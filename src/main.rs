@@ -2,18 +2,14 @@ use std::cell::Cell;
 use windows::{
     core::w,
     Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM, COLORREF, POINT},
-        Graphics::{
-            Gdi::{
-                CreateCompatibleDC, CreateCompatibleBitmap, DeleteDC, DeleteObject,
-                GetDC, ReleaseDC, SelectObject, BitBlt, SRCCOPY,
-                CreateSolidBrush, FillRect, Ellipse,
-                CreatePen, PS_SOLID,
-                BeginPaint, EndPaint, PAINTSTRUCT, InvalidateRect,
-            },
+        Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Graphics::Gdi::{
+            BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen,
+            CreateSolidBrush, DeleteDC, DeleteObject, Ellipse, EndPaint, FillRect, GetDC,
+            InvalidateRect, ReleaseDC, SelectObject, PAINTSTRUCT, PS_SOLID, SRCCOPY,
         },
         System::LibraryLoader::GetModuleHandleW,
-        UI::WindowsAndMessaging::*,
+        UI::{Input::KeyboardAndMouse::VK_ESCAPE, WindowsAndMessaging::*},
     },
 };
 
@@ -21,11 +17,40 @@ use windows::{
 thread_local! {
     static PHASE: Cell<f32> = Cell::new(0.0);
     static HOVER: Cell<bool> = Cell::new(false);
+    static CURSOR: Cell<POINT> = Cell::new(POINT::default());
+    static WINDOW_RECT: Cell<RECT> = Cell::new(RECT::default());
 }
 
-fn main() {
+struct Size {
+    pub width: i32,
+    pub height: i32,
+}
+
+impl Size {
+    const fn w(&self) -> i32 {
+        self.width
+    }
+
+    const fn h(&self) -> i32 {
+        self.height
+    }
+}
+
+const WINDOW_SIZE: Size = Size {
+    width: 400,
+    height: 300,
+};
+
+const WINDOW_POSITION: POINT = POINT { x: 100, y: 100 };
+
+const CIRCLE_CENTER: POINT = POINT {
+    x: WINDOW_SIZE.w() / 2,
+    y: WINDOW_SIZE.h() / 2,
+};
+
+fn main() -> windows::core::Result<()> {
     unsafe {
-        let h_instance = GetModuleHandleW(None).unwrap();
+        let h_instance = GetModuleHandleW(None)?;
         let class_name = w!("InteractiveWidget");
 
         let wc = WNDCLASSW {
@@ -41,21 +66,21 @@ fn main() {
             class_name,
             w!("Interactive Transparent Widget"),
             WS_POPUP,
-            100,
-            100,
-            400,
-            300,
+            WINDOW_POSITION.x,
+            WINDOW_POSITION.y,
+            WINDOW_SIZE.w(),
+            WINDOW_SIZE.h(),
             None,
             None,
             h_instance,
             None,
-        ).unwrap();
+        )?;
 
         let _ = ShowWindow(hwnd, SW_SHOW);
-        
+
         // Set initial layered window attributes
         SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_COLORKEY | LWA_ALPHA).unwrap();
-        
+
         let _ = PostMessageW(hwnd, WM_PAINT, WPARAM(0), LPARAM(0));
 
         // 60 FPS timer
@@ -63,10 +88,39 @@ fn main() {
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).into() {
-            let _ = TranslateMessage(&msg);
+            // let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
     }
+    Ok(())
+}
+
+// fn cursor_in_rect(rect: &RECT) -> bool {
+//     let pt = CURSOR.with(|c| c.get());
+//     (rect.left..rect.right).contains(&pt.x) && (rect.top..rect.bottom).contains(&pt.y)
+// }
+
+// fn cursor_in_window() -> bool {
+//     let rect = WINDOW_RECT.with(|wr| wr.get());
+//     cursor_in_rect(&rect)
+// }
+
+const fn relative_position(pt: &POINT, rect: &RECT) -> POINT {
+    POINT {
+        x: pt.x - rect.left,
+        y: pt.y - rect.top,
+    }
+}
+
+fn cursor_in_circle() -> bool {
+    let pt = relative_position(&CURSOR.get(), &WINDOW_RECT.get());
+    let dx = (pt.x - CIRCLE_CENTER.x) as f32;
+    let dy = (pt.y - CIRCLE_CENTER.y) as f32;
+    let radius = PHASE.with(|phase| {
+        let phase = phase.get();
+        60.0 + (phase.sin() * 30.0)
+    });
+    dx * dx + dy * dy < radius * radius
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -74,35 +128,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         match msg {
             WM_TIMER => {
                 PHASE.with(|p| p.set(p.get() + 0.05));
-                
-                // Check current cursor position to maintain hover state even when stationary
-                let mut cursor_pos = POINT { x: 0, y: 0 };
-                if GetCursorPos(&mut cursor_pos).is_ok() {
+                CURSOR.with(|c| {
+                    let mut cursor_pos = POINT::default();
+                    if GetCursorPos(&mut cursor_pos).is_ok() {
+                        c.set(cursor_pos);
+                    }
+                });
+                WINDOW_RECT.with(|wr| {
                     let mut window_rect = RECT::default();
                     if GetWindowRect(hwnd, &mut window_rect).is_ok() {
-                        let pt_x = cursor_pos.x - window_rect.left;
-                        let pt_y = cursor_pos.y - window_rect.top;
-                        
-                        // Check if cursor is within window bounds and over circle
-                        if pt_x >= 0 && pt_x < 400 && pt_y >= 0 && pt_y < 300 {
-                            let dx = pt_x as f32 - 200.0;
-                            let dy = pt_y as f32 - 150.0;
-                            
-                            let current_radius = PHASE.with(|p| {
-                                let phase = p.get();
-                                60.0 + (phase.sin() * 30.0)
-                            });
-                            
-                            let dist2 = dx * dx + dy * dy;
-                            let inside = dist2 < current_radius * current_radius;
-                            
-                            HOVER.with(|h| h.set(inside));
-                        } else {
-                            HOVER.with(|h| h.set(false));
-                        }
+                        wr.set(window_rect);
                     }
-                }
-                
+                });
+                HOVER.set(cursor_in_circle());
                 let _ = InvalidateRect(hwnd, None, false);
                 LRESULT(0)
             }
@@ -113,49 +151,46 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let _ = EndPaint(hwnd, &ps);
                 LRESULT(0)
             }
-            WM_NCHITTEST => {
-                let x = (lparam.0 as i16) as i32;
-                let y = ((lparam.0 >> 16) as i16) as i32;
+            // WM_NCHITTEST => {
+            //     println!("WM_NCHITTEST received");
+            //     let cursor_pos = POINT {
+            //         x: (lparam.0 as i16) as i32,
+            //         y: ((lparam.0 >> 16) as i16) as i32,
+            //     };
 
-                // Convert screen coordinates to window coordinates
-                let mut window_rect = RECT::default();
-                if GetWindowRect(hwnd, &mut window_rect).is_ok() {
-                    let pt_x = x - window_rect.left;
-                    let pt_y = y - window_rect.top;
-
-                    // Our circle is centered at (200,150)
-                    let dx = pt_x as f32 - 200.0;
-                    let dy = pt_y as f32 - 150.0;
-
-                    let current_radius = PHASE.with(|p| {
-                        let phase = p.get();
-                        60.0 + (phase.sin() * 30.0)
-                    });
-                    
-                    let dist2 = dx * dx + dy * dy;
-                    let inside = dist2 < current_radius * current_radius;
-
-                    if inside {
-                        LRESULT(HTCLIENT as isize)
-                    } else {
-                        LRESULT(HTTRANSPARENT as isize)
-                    }
-                } else {
-                    LRESULT(HTTRANSPARENT as isize)
-                }
-            }
+            //     // Convert screen coordinates to window coordinates
+            //     let mut window_rect = RECT::default();
+            //     if GetWindowRect(hwnd, &mut window_rect).is_ok() {
+            //         let cursor_pos = relative_position(&cursor_pos, &window_rect);
+            //         if is_in_circle(&cursor_pos) {
+            //             dbg!("Hit circle area");
+            //             LRESULT(HTCLIENT as isize)
+            //         } else {
+            //             dbg!("Missed circle area");
+            //             LRESULT(HTTRANSPARENT as isize)
+            //         }
+            //     } else {
+            //         dbg!("Failed to get window rect");
+            //         LRESULT(HTTRANSPARENT as isize)
+            //     }
+            // }
             WM_MOUSEMOVE => {
                 // Timer will handle hover detection, just acknowledge the message
                 LRESULT(0)
             }
             WM_LBUTTONDOWN => {
                 // Simple response when clicked - could add beep here later
+                println!("Circle clicked!");
                 LRESULT(0)
             }
             WM_SETCURSOR => {
                 // Always use arrow cursor to prevent busy cursor
                 SetCursor(LoadCursorW(None, IDC_ARROW).unwrap_or_default());
                 LRESULT(1) // Indicate we handled the cursor
+            }
+            WM_KEYDOWN if wparam.0 as u16 == VK_ESCAPE.0 => {
+                let _ = DestroyWindow(hwnd);
+                LRESULT(0)
             }
             WM_DESTROY => {
                 let _ = KillTimer(hwnd, 1);
@@ -171,16 +206,11 @@ unsafe fn draw_gdi(hwnd: HWND) {
     let hdc_screen = GetDC(hwnd);
     let hdc_mem = CreateCompatibleDC(hdc_screen);
 
-    let width = 400;
-    let height = 300;
-
-    let hbitmap = CreateCompatibleBitmap(hdc_screen, width, height);
+    let hbitmap = CreateCompatibleBitmap(hdc_screen, WINDOW_SIZE.w(), WINDOW_SIZE.h());
     let old_bmp = SelectObject(hdc_mem, hbitmap);
 
-    // Clear background with black (will be made transparent)
-    let rect = RECT { left: 0, top: 0, right: width, bottom: height };
     let bg_brush = CreateSolidBrush(COLORREF(0x00000000)); // Black background
-    FillRect(hdc_mem, &rect, bg_brush);
+    FillRect(hdc_mem, &WINDOW_RECT.get(), bg_brush);
     let _ = DeleteObject(bg_brush);
 
     // Animation state - get current values
@@ -192,32 +222,28 @@ unsafe fn draw_gdi(hwnd: HWND) {
     });
 
     // Hover highlight
-    let hover = HOVER.with(|h| h.get());
-
-    let color_value = if hover {
-        0x0000FF00 // Pure green when hovering (BGR format)
-    } else {
-        0x000000FF // Pure red normally (BGR format)
-    };
+    let red = 0x000000FF; // Red in BGR format
+    let green = 0x0000FF00; // Green in BGR format
+    let color_value = if HOVER.get() { green } else { red };
 
     // Create brush and pen for the circle
-    let circle_brush = CreateSolidBrush(COLORREF(color_value));
-    let circle_pen = CreatePen(PS_SOLID, 2, COLORREF(color_value));
-    
+    // let fill = COLORREF(0x00FFFFFF); // White fill
+    let fill = COLORREF(0x00000000); // Transparent fill
+    let circle_brush = CreateSolidBrush(fill);
+    let circle_pen = CreatePen(PS_SOLID, 3, COLORREF(color_value));
+
     let old_brush = SelectObject(hdc_mem, circle_brush);
     let old_pen = SelectObject(hdc_mem, circle_pen);
 
     // Draw circle (ellipse)
-    let center_x = 200;
-    let center_y = 150;
     let radius_i = radius as i32;
-    
+
     let _ = Ellipse(
         hdc_mem,
-        center_x - radius_i,
-        center_y - radius_i,
-        center_x + radius_i,
-        center_y + radius_i,
+        CIRCLE_CENTER.x - radius_i,
+        CIRCLE_CENTER.y - radius_i,
+        CIRCLE_CENTER.x + radius_i,
+        CIRCLE_CENTER.y + radius_i,
     );
 
     // Clean up drawing objects
@@ -227,7 +253,17 @@ unsafe fn draw_gdi(hwnd: HWND) {
     let _ = DeleteObject(circle_pen);
 
     // Copy to screen efficiently
-    let _ = BitBlt(hdc_screen, 0, 0, width, height, hdc_mem, 0, 0, SRCCOPY);
+    let _ = BitBlt(
+        hdc_screen,
+        0,
+        0,
+        WINDOW_SIZE.w(),
+        WINDOW_SIZE.h(),
+        hdc_mem,
+        0,
+        0,
+        SRCCOPY,
+    );
 
     // Update transparency
     let alpha = (base_alpha * 255.0) as u8;
