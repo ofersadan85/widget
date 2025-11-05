@@ -9,7 +9,10 @@ use windows::{
             InvalidateRect, ReleaseDC, SelectObject, PAINTSTRUCT, PS_SOLID, SRCCOPY,
         },
         System::LibraryLoader::GetModuleHandleW,
-        UI::{Input::KeyboardAndMouse::VK_ESCAPE, WindowsAndMessaging::*},
+        UI::{
+            Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_A, VK_D, VK_ESCAPE, VK_S, VK_W},
+            WindowsAndMessaging::*,
+        },
     },
 };
 
@@ -79,7 +82,7 @@ fn main() -> windows::core::Result<()> {
         let _ = ShowWindow(hwnd, SW_SHOW);
 
         // Set initial layered window attributes
-        SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_COLORKEY | LWA_ALPHA).unwrap();
+        SetLayeredWindowAttributes(hwnd, COLORREF(0), 127, LWA_COLORKEY | LWA_ALPHA).unwrap();
 
         let _ = PostMessageW(hwnd, WM_PAINT, WPARAM(0), LPARAM(0));
 
@@ -188,10 +191,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 SetCursor(LoadCursorW(None, IDC_ARROW).unwrap_or_default());
                 LRESULT(1) // Indicate we handled the cursor
             }
-            WM_KEYDOWN if wparam.0 as u16 == VK_ESCAPE.0 => {
-                let _ = DestroyWindow(hwnd);
-                LRESULT(0)
-            }
+            WM_KEYDOWN => handle_keys(hwnd, VIRTUAL_KEY(wparam.0 as u16), lparam),
             WM_DESTROY => {
                 let _ = KillTimer(hwnd, 1);
                 PostQuitMessage(0);
@@ -200,6 +200,35 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
+}
+
+fn handle_keys(hwnd: HWND, key: VIRTUAL_KEY, lparam: LPARAM) -> LRESULT {
+    let mut movement = POINT::default();
+    match key {
+        VK_ESCAPE => unsafe {
+            let _ = DestroyWindow(hwnd);
+        },
+        VK_W => movement.y -= 10,
+        VK_S => movement.y += 10,
+        VK_A => movement.x -= 10,
+        VK_D => movement.x += 10,
+        _ => {}
+    }
+    if movement != POINT::default() {
+        let current = WINDOW_RECT.get();
+        let _ = unsafe {
+            SetWindowPos(
+                hwnd,
+                HWND_TOP,
+                current.left + movement.x,
+                current.top + movement.y,
+                WINDOW_SIZE.w(),
+                WINDOW_SIZE.h(),
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        };
+    }
+    LRESULT(0)
 }
 
 unsafe fn draw_gdi(hwnd: HWND) {
@@ -214,11 +243,9 @@ unsafe fn draw_gdi(hwnd: HWND) {
     let _ = DeleteObject(bg_brush);
 
     // Animation state - get current values
-    let (radius, base_alpha) = PHASE.with(|p| {
+    let radius = PHASE.with(|p| {
         let phase = p.get();
-        let r = 60.0 + (phase.sin() * 30.0);
-        let a = 0.6 + 0.4 * (phase.cos() * 0.5 + 0.5); // Animate alpha too
-        (r, a)
+        60.0 + (phase.sin() * 30.0)
     });
 
     // Hover highlight
@@ -230,7 +257,7 @@ unsafe fn draw_gdi(hwnd: HWND) {
     // let fill = COLORREF(0x00FFFFFF); // White fill
     let fill = COLORREF(0x00000000); // Transparent fill
     let circle_brush = CreateSolidBrush(fill);
-    let circle_pen = CreatePen(PS_SOLID, 3, COLORREF(color_value));
+    let circle_pen = CreatePen(PS_SOLID, 15, COLORREF(color_value));
 
     let old_brush = SelectObject(hdc_mem, circle_brush);
     let old_pen = SelectObject(hdc_mem, circle_pen);
@@ -266,8 +293,8 @@ unsafe fn draw_gdi(hwnd: HWND) {
     );
 
     // Update transparency
-    let alpha = (base_alpha * 255.0) as u8;
-    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0x00000000), alpha, LWA_COLORKEY);
+    // let alpha = (base_alpha * 255.0) as u8;
+    // let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0x00000000), alpha, LWA_COLORKEY);
 
     // Clean up
     SelectObject(hdc_mem, old_bmp);
