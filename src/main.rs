@@ -2,15 +2,19 @@ use std::cell::Cell;
 use windows::{
     core::w,
     Win32::{
-        Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::{
-            BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreatePen,
-            CreateSolidBrush, DeleteDC, DeleteObject, Ellipse, EndPaint, FillRect, GetDC,
-            InvalidateRect, ReleaseDC, SelectObject, PAINTSTRUCT, PS_SOLID, SRCCOPY,
+            BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection,
+            CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, Ellipse, EndPaint, FillRect,
+            GetDC, InvalidateRect, ReleaseDC, SelectObject, SetDIBits, BITMAPINFO,
+            BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT, PS_SOLID, SRCCOPY,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
-            Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_A, VK_D, VK_ESCAPE, VK_S, VK_W},
+            Input::KeyboardAndMouse::{
+                GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, MOD_CONTROL, VIRTUAL_KEY, VK_0,
+                VK_A, VK_D, VK_ESCAPE, VK_LBUTTON, VK_S, VK_W,
+            },
             WindowsAndMessaging::*,
         },
     },
@@ -78,6 +82,8 @@ fn main() -> windows::core::Result<()> {
             h_instance,
             None,
         )?;
+
+        RegisterHotKey(hwnd, 999, MOD_CONTROL, VK_0.0 as u32)?;
 
         let _ = ShowWindow(hwnd, SW_SHOW);
 
@@ -179,6 +185,22 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             // }
             WM_MOUSEMOVE => {
                 // Timer will handle hover detection, just acknowledge the message
+
+                // Handle dragging if needed
+                if GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 {
+                    let current_pos = CURSOR.get();
+                    let new_x = current_pos.x - (WINDOW_SIZE.w() / 2);
+                    let new_y = current_pos.y - (WINDOW_SIZE.h() / 2);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        HWND_TOP,
+                        new_x,
+                        new_y,
+                        WINDOW_SIZE.w(),
+                        WINDOW_SIZE.h(),
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
                 LRESULT(0)
             }
             WM_LBUTTONDOWN => {
@@ -191,8 +213,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 SetCursor(LoadCursorW(None, IDC_ARROW).unwrap_or_default());
                 LRESULT(1) // Indicate we handled the cursor
             }
+            WM_HOTKEY => {
+                // Focus the window when hotkey is pressed
+                let _ = SetForegroundWindow(hwnd);
+                println!("Hotkey pressed!");
+                LRESULT(0)
+            }
             WM_KEYDOWN => handle_keys(hwnd, VIRTUAL_KEY(wparam.0 as u16), lparam),
             WM_DESTROY => {
+                let _ = UnregisterHotKey(hwnd, 999);
                 let _ = KillTimer(hwnd, 1);
                 PostQuitMessage(0);
                 LRESULT(0)
@@ -235,51 +264,74 @@ unsafe fn draw_gdi(hwnd: HWND) {
     let hdc_screen = GetDC(hwnd);
     let hdc_mem = CreateCompatibleDC(hdc_screen);
 
-    let hbitmap = CreateCompatibleBitmap(hdc_screen, WINDOW_SIZE.w(), WINDOW_SIZE.h());
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: WINDOW_SIZE.w(),
+            biHeight: -WINDOW_SIZE.h(),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+    let hbitmap = CreateDIBSection(
+        hdc_mem,
+        &bmi,
+        DIB_RGB_COLORS,
+        &mut bits_ptr,
+        HANDLE::default(),
+        0,
+    )
+    .unwrap_or_default();
     let old_bmp = SelectObject(hdc_mem, hbitmap);
 
-    let bg_brush = CreateSolidBrush(COLORREF(0x00000000)); // Black background
-    FillRect(hdc_mem, &WINDOW_RECT.get(), bg_brush);
-    let _ = DeleteObject(bg_brush);
+    if !bits_ptr.is_null() {
+        let buffer_size = (WINDOW_SIZE.w() * WINDOW_SIZE.h() * 4) as usize;
+        let dst = std::slice::from_raw_parts_mut(bits_ptr as *mut u8, buffer_size);
 
-    // Animation state - get current values
-    let radius = PHASE.with(|p| {
-        let phase = p.get();
+        // Fill with arbitrary image data (BGRA)
+        let red = ((PHASE.get() % 1.0) * 255.0) as u8;
+        for y in 0..WINDOW_SIZE.h() {
+            for x in 0..WINDOW_SIZE.w() {
+                let i = ((y * WINDOW_SIZE.w() + x) * 4) as usize;
+                dst[i + 0] = (x % 255) as u8; // Blue
+                dst[i + 1] = (y % 255) as u8; // Green
+                dst[i + 2] = red;
+                // dst[i + 3] = 255; // Alpha (ignored in SRCCOPY)
+            }
+        }
+    }
+
+    let pen_color = if HOVER.get() {
+        COLORREF(0x00FF00) // Green when hovered
+    } else {
+        COLORREF(0x0000FF) // Blue otherwise
+    };
+    let hpen = CreatePen(PS_SOLID, 3, pen_color);
+    let old_pen = SelectObject(hdc_mem, hpen);
+    let brush = CreateSolidBrush(COLORREF(0x00000000));
+    let old_brush = SelectObject(hdc_mem, brush);
+    let radius = PHASE.with(|phase| {
+        let phase = phase.get();
         60.0 + (phase.sin() * 30.0)
-    });
-
-    // Hover highlight
-    let red = 0x000000FF; // Red in BGR format
-    let green = 0x0000FF00; // Green in BGR format
-    let color_value = if HOVER.get() { green } else { red };
-
-    // Create brush and pen for the circle
-    // let fill = COLORREF(0x00FFFFFF); // White fill
-    let fill = COLORREF(0x00000000); // Transparent fill
-    let circle_brush = CreateSolidBrush(fill);
-    let circle_pen = CreatePen(PS_SOLID, 15, COLORREF(color_value));
-
-    let old_brush = SelectObject(hdc_mem, circle_brush);
-    let old_pen = SelectObject(hdc_mem, circle_pen);
-
-    // Draw circle (ellipse)
-    let radius_i = radius as i32;
-
+    }) as i32;
     let _ = Ellipse(
         hdc_mem,
-        CIRCLE_CENTER.x - radius_i,
-        CIRCLE_CENTER.y - radius_i,
-        CIRCLE_CENTER.x + radius_i,
-        CIRCLE_CENTER.y + radius_i,
+        CIRCLE_CENTER.x - radius,
+        CIRCLE_CENTER.y - radius,
+        CIRCLE_CENTER.x + radius,
+        CIRCLE_CENTER.y + radius,
     );
+    let _ = SelectObject(hdc_mem, old_pen);
+    let _ = DeleteObject(hpen);
+    let _ = SelectObject(hdc_mem, old_brush);
+    let _ = DeleteObject(brush);
 
-    // Clean up drawing objects
-    SelectObject(hdc_mem, old_brush);
-    SelectObject(hdc_mem, old_pen);
-    let _ = DeleteObject(circle_brush);
-    let _ = DeleteObject(circle_pen);
-
-    // Copy to screen efficiently
+    // Blit to screen
     let _ = BitBlt(
         hdc_screen,
         0,
@@ -291,10 +343,6 @@ unsafe fn draw_gdi(hwnd: HWND) {
         0,
         SRCCOPY,
     );
-
-    // Update transparency
-    // let alpha = (base_alpha * 255.0) as u8;
-    // let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0x00000000), alpha, LWA_COLORKEY);
 
     // Clean up
     SelectObject(hdc_mem, old_bmp);
