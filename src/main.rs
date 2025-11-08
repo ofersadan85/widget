@@ -4,10 +4,10 @@ use windows::{
     Win32::{
         Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::{
-            BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection,
-            CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, Ellipse, EndPaint, FillRect,
-            GetDC, InvalidateRect, ReleaseDC, SelectObject, SetDIBits, BITMAPINFO,
-            BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT, PS_SOLID, SRCCOPY,
+            BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, CreatePen, CreateSolidBrush,
+            DeleteDC, DeleteObject, Ellipse, EndPaint, GetDC, InvalidateRect, ReleaseDC,
+            SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
+            PS_SOLID, SRCCOPY,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
@@ -15,15 +15,23 @@ use windows::{
                 GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, MOD_CONTROL, VIRTUAL_KEY, VK_0,
                 VK_A, VK_D, VK_ESCAPE, VK_LBUTTON, VK_S, VK_W,
             },
-            WindowsAndMessaging::*,
+            WindowsAndMessaging::{
+                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
+                GetMessageW, GetWindowRect, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage,
+                RegisterClassW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes,
+                SetTimer, SetWindowPos, ShowWindow, HWND_TOP, IDC_ARROW, LWA_ALPHA, LWA_COLORKEY,
+                MSG, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN,
+                WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_TIMER, WNDCLASSW,
+                WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+            },
         },
     },
 };
 
 // Animation & interaction state
 thread_local! {
-    static PHASE: Cell<f32> = Cell::new(0.0);
-    static HOVER: Cell<bool> = Cell::new(false);
+    static PHASE: Cell<f32> = const { Cell::new(0.0) };
+    static HOVER: Cell<bool> = const { Cell::new(false) };
     static CURSOR: Cell<POINT> = Cell::new(POINT::default());
     static WINDOW_RECT: Cell<RECT> = Cell::new(RECT::default());
 }
@@ -66,7 +74,7 @@ fn main() -> windows::core::Result<()> {
             lpfnWndProc: Some(wndproc),
             ..Default::default()
         };
-        RegisterClassW(&wc);
+        RegisterClassW(&raw const wc);
 
         let hwnd = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, // no WS_EX_TRANSPARENT now
@@ -83,7 +91,7 @@ fn main() -> windows::core::Result<()> {
             None,
         )?;
 
-        RegisterHotKey(hwnd, 999, MOD_CONTROL, VK_0.0 as u32)?;
+        RegisterHotKey(hwnd, 999, MOD_CONTROL, u32::from(VK_0.0))?;
 
         let _ = ShowWindow(hwnd, SW_SHOW);
 
@@ -96,9 +104,9 @@ fn main() -> windows::core::Result<()> {
         SetTimer(hwnd, 1, 16, None);
 
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).into() {
+        while GetMessageW(&raw mut msg, None, 0, 0).into() {
             // let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            DispatchMessageW(&raw const msg);
         }
     }
     Ok(())
@@ -114,7 +122,7 @@ fn main() -> windows::core::Result<()> {
 //     cursor_in_rect(&rect)
 // }
 
-const fn relative_position(pt: &POINT, rect: &RECT) -> POINT {
+const fn relative_position(pt: POINT, rect: &RECT) -> POINT {
     POINT {
         x: pt.x - rect.left,
         y: pt.y - rect.top,
@@ -122,7 +130,7 @@ const fn relative_position(pt: &POINT, rect: &RECT) -> POINT {
 }
 
 fn cursor_in_circle() -> bool {
-    let pt = relative_position(&CURSOR.get(), &WINDOW_RECT.get());
+    let pt = relative_position(CURSOR.get(), &WINDOW_RECT.get());
     let dx = (pt.x - CIRCLE_CENTER.x) as f32;
     let dy = (pt.y - CIRCLE_CENTER.y) as f32;
     let radius = PHASE.with(|phase| {
@@ -139,13 +147,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 PHASE.with(|p| p.set(p.get() + 0.05));
                 CURSOR.with(|c| {
                     let mut cursor_pos = POINT::default();
-                    if GetCursorPos(&mut cursor_pos).is_ok() {
+                    if GetCursorPos(&raw mut cursor_pos).is_ok() {
                         c.set(cursor_pos);
                     }
                 });
                 WINDOW_RECT.with(|wr| {
                     let mut window_rect = RECT::default();
-                    if GetWindowRect(hwnd, &mut window_rect).is_ok() {
+                    if GetWindowRect(hwnd, &raw mut window_rect).is_ok() {
                         wr.set(window_rect);
                     }
                 });
@@ -155,9 +163,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             WM_PAINT => {
                 let mut ps = PAINTSTRUCT::default();
-                let _hdc = BeginPaint(hwnd, &mut ps);
+                let _hdc = BeginPaint(hwnd, &raw mut ps);
                 draw_gdi(hwnd);
-                let _ = EndPaint(hwnd, &ps);
+                let _ = EndPaint(hwnd, &raw const ps);
                 LRESULT(0)
             }
             // WM_NCHITTEST => {
@@ -187,7 +195,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 // Timer will handle hover detection, just acknowledge the message
 
                 // Handle dragging if needed
-                if GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 {
+                if GetAsyncKeyState(i32::from(VK_LBUTTON.0)) < 0 {
                     let current_pos = CURSOR.get();
                     let new_x = current_pos.x - (WINDOW_SIZE.w() / 2);
                     let new_y = current_pos.y - (WINDOW_SIZE.h() / 2);
@@ -232,6 +240,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
 }
 
 fn handle_keys(hwnd: HWND, key: VIRTUAL_KEY, lparam: LPARAM) -> LRESULT {
+    let mut handled = true;
     let mut movement = POINT::default();
     match key {
         VK_ESCAPE => unsafe {
@@ -241,7 +250,9 @@ fn handle_keys(hwnd: HWND, key: VIRTUAL_KEY, lparam: LPARAM) -> LRESULT {
         VK_S => movement.y += 10,
         VK_A => movement.x -= 10,
         VK_D => movement.x += 10,
-        _ => {}
+        _ => {
+            handled = false;
+        }
     }
     if movement != POINT::default() {
         let current = WINDOW_RECT.get();
@@ -257,7 +268,11 @@ fn handle_keys(hwnd: HWND, key: VIRTUAL_KEY, lparam: LPARAM) -> LRESULT {
             )
         };
     }
-    LRESULT(0)
+    if handled {
+        LRESULT(0)
+    } else {
+        unsafe { DefWindowProcW(hwnd, WM_KEYDOWN, WPARAM(key.0 as usize), lparam) }
+    }
 }
 
 unsafe fn draw_gdi(hwnd: HWND) {
@@ -280,9 +295,9 @@ unsafe fn draw_gdi(hwnd: HWND) {
     let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
     let hbitmap = CreateDIBSection(
         hdc_mem,
-        &bmi,
+        &raw const bmi,
         DIB_RGB_COLORS,
-        &mut bits_ptr,
+        &raw mut bits_ptr,
         HANDLE::default(),
         0,
     )
@@ -291,14 +306,14 @@ unsafe fn draw_gdi(hwnd: HWND) {
 
     if !bits_ptr.is_null() {
         let buffer_size = (WINDOW_SIZE.w() * WINDOW_SIZE.h() * 4) as usize;
-        let dst = std::slice::from_raw_parts_mut(bits_ptr as *mut u8, buffer_size);
+        let dst = std::slice::from_raw_parts_mut(bits_ptr.cast::<u8>(), buffer_size);
 
         // Fill with arbitrary image data (BGRA)
         let red = ((PHASE.get() % 1.0) * 255.0) as u8;
         for y in 0..WINDOW_SIZE.h() {
             for x in 0..WINDOW_SIZE.w() {
                 let i = ((y * WINDOW_SIZE.w() + x) * 4) as usize;
-                dst[i + 0] = (x % 255) as u8; // Blue
+                dst[i] = (x % 255) as u8; // Blue
                 dst[i + 1] = (y % 255) as u8; // Green
                 dst[i + 2] = red;
                 // dst[i + 3] = 255; // Alpha (ignored in SRCCOPY)
@@ -307,18 +322,15 @@ unsafe fn draw_gdi(hwnd: HWND) {
     }
 
     let pen_color = if HOVER.get() {
-        COLORREF(0x00FF00) // Green when hovered
+        COLORREF(0x0000_FF00) // Green when hovered
     } else {
-        COLORREF(0x0000FF) // Blue otherwise
+        COLORREF(0x0000_00FF) // Blue otherwise
     };
     let hpen = CreatePen(PS_SOLID, 3, pen_color);
     let old_pen = SelectObject(hdc_mem, hpen);
-    let brush = CreateSolidBrush(COLORREF(0x00000000));
+    let brush = CreateSolidBrush(COLORREF(0x0000_0000));
     let old_brush = SelectObject(hdc_mem, brush);
-    let radius = PHASE.with(|phase| {
-        let phase = phase.get();
-        60.0 + (phase.sin() * 30.0)
-    }) as i32;
+    let radius = (60.0 + (PHASE.get().sin() * 30.0)) as i32;
     let _ = Ellipse(
         hdc_mem,
         CIRCLE_CENTER.x - radius,
