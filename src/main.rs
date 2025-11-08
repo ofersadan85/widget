@@ -1,5 +1,3 @@
-#![allow(non_snake_case)]
-
 use std::cell::Cell;
 
 use winsafe::co::{ERROR, LWA, PS, ROP, SW, VK, WM, WS, WS_EX};
@@ -11,8 +9,8 @@ use winsafe::{
 
 // Animation & interaction state
 thread_local! {
-    pub static PHASE: Cell<f32> = Cell::new(0.0);
-    pub static HOVER: Cell<bool> = Cell::new(false);
+    pub static PHASE: Cell<f32> = const { Cell::new(0.0) };
+    pub static HOVER: Cell<bool> = const { Cell::new(false) };
     pub static CURSOR: Cell<POINT> = Cell::new(POINT::default());
     pub static WINDOW_RECT: Cell<RECT> = Cell::new(RECT::default());
 }
@@ -38,7 +36,7 @@ fn draw_gdi(hwnd: &HWND) -> SysResult<()> {
     let _old_bmp = hdc_mem.SelectObject(&*h_bitmap)?;
 
     let bg_brush = HBRUSH::CreateSolidBrush(ALPHA_KEY)?;
-    (*hdc_mem).FillRect(WINDOW_RECT.get(), &*bg_brush)?;
+    (*hdc_mem).FillRect(WINDOW_RECT.get(), &bg_brush)?;
 
     // Animation state - get current values
     let phase = PHASE.get();
@@ -70,28 +68,28 @@ fn draw_gdi(hwnd: &HWND) -> SysResult<()> {
     })?;
 
     let blue_brush = HBRUSH::CreateSolidBrush(BLUE)?;
-    let _ = hdc_mem.FrameRect(
+    hdc_mem.FrameRect(
         RECT {
             left: 0,
             top: 0,
             right: WINDOW_SIZE.cx,
             bottom: WINDOW_SIZE.cy,
         },
-        &*blue_brush,
+        &blue_brush,
     )?;
 
     // Copy to screen efficiently
     hdc_screen.BitBlt(
         POINT::default(),
         WINDOW_SIZE,
-        &*hdc_mem,
+        &hdc_mem,
         POINT::default(),
         ROP::SRCCOPY,
     )?;
     Ok(())
 }
 
-const fn relative_position(pt: &POINT, rect: &RECT) -> POINT {
+const fn relative_position(pt: POINT, rect: &RECT) -> POINT {
     POINT {
         x: pt.x - rect.left,
         y: pt.y - rect.top,
@@ -99,7 +97,7 @@ const fn relative_position(pt: &POINT, rect: &RECT) -> POINT {
 }
 
 fn cursor_in_circle() -> bool {
-    let pt = relative_position(&CURSOR.get(), &WINDOW_RECT.get());
+    let pt = relative_position(CURSOR.get(), &WINDOW_RECT.get());
     let dx = (pt.x - CIRCLE_CENTER.x) as f32;
     let dy = (pt.y - CIRCLE_CENTER.y) as f32;
     let radius = PHASE.with(|phase| {
@@ -170,7 +168,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: WM, wparam: usize, _lparam: isize) -
     0
 }
 
-pub fn create_window(title: Option<&str>, position: POINT, size: SIZE) -> SysResult<HWND> {
+fn create_window(title: Option<&str>, position: POINT, size: SIZE) -> SysResult<HWND> {
     let h_instance = HINSTANCE::GetModuleHandle(None)?;
     let mut class_name = WString::from_str("MyInteractiveWidget");
     let mut wc = WNDCLASSEX::default();
