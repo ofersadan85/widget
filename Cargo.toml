@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+ffmpeg-next = "8.0.0"
+thiserror = "2.0.17"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "chrono"] }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -17,6 +21,10 @@ windows = { version = "0.58", features = [
     "Win32_Media_Audio",
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
+
+[lints.rust]
+unused_imports = "allow"
+dead_code = "allow"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

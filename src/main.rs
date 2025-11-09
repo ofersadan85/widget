@@ -1,4 +1,6 @@
-use std::cell::Cell;
+use ffmpeg_next as ffmpeg;
+use std::sync::{Arc, Mutex};
+use tracing::{debug, error, info};
 use windows::{
     core::w,
     Win32::{
@@ -19,51 +21,34 @@ use windows::{
                 CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
                 GetMessageW, GetWindowRect, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage,
                 RegisterClassW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes,
-                SetTimer, SetWindowPos, ShowWindow, HWND_TOP, IDC_ARROW, LWA_ALPHA, LWA_COLORKEY,
-                MSG, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN,
-                WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_TIMER, WNDCLASSW,
-                WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+                SetTimer, SetWindowPos, ShowWindow, TranslateMessage, HWND_TOP, IDC_ARROW,
+                LWA_ALPHA, LWA_COLORKEY, MSG, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WM_DESTROY,
+                WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR,
+                WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
             },
         },
     },
 };
 
-// Animation & interaction state
-thread_local! {
-    static PHASE: Cell<f32> = const { Cell::new(0.0) };
-    static HOVER: Cell<bool> = const { Cell::new(false) };
-    static CURSOR: Cell<POINT> = Cell::new(POINT::default());
-    static WINDOW_RECT: Cell<RECT> = Cell::new(RECT::default());
-}
+mod error;
+mod ff;
+mod state;
+use error::Result;
+use ff::FrameStream;
+use state::{WindowState, WINDOW_STATE};
 
-struct Size {
-    pub width: i32,
-    pub height: i32,
-}
+const HOTKEY_ID: i32 = 999;
 
-impl Size {
-    const fn w(&self) -> i32 {
-        self.width
-    }
+fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+    ffmpeg::init()?;
 
-    const fn h(&self) -> i32 {
-        self.height
-    }
-}
+    std::thread::spawn(move || {
+        if let Err(e) = FrameStream::new("sample-5.mp4").and_then(|mut s| s.read_frames()) {
+            error!("Error in FFmpeg thread: {}", e);
+        }
+    });
 
-const WINDOW_SIZE: Size = Size {
-    width: 400,
-    height: 300,
-};
-
-const WINDOW_POSITION: POINT = POINT { x: 100, y: 100 };
-
-const CIRCLE_CENTER: POINT = POINT {
-    x: WINDOW_SIZE.w() / 2,
-    y: WINDOW_SIZE.h() / 2,
-};
-
-fn main() -> windows::core::Result<()> {
     unsafe {
         let h_instance = GetModuleHandleW(None)?;
         let class_name = w!("InteractiveWidget");
@@ -76,27 +61,30 @@ fn main() -> windows::core::Result<()> {
         };
         RegisterClassW(&raw const wc);
 
-        let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, // no WS_EX_TRANSPARENT now
-            class_name,
-            w!("Interactive Transparent Widget"),
-            WS_POPUP,
-            WINDOW_POSITION.x,
-            WINDOW_POSITION.y,
-            WINDOW_SIZE.w(),
-            WINDOW_SIZE.h(),
-            None,
-            None,
-            h_instance,
-            None,
-        )?;
+        let hwnd = {
+            let state = WINDOW_STATE.lock().unwrap();
+            CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, // no WS_EX_TRANSPARENT now
+                class_name,
+                w!("Interactive Transparent Widget"),
+                WS_POPUP,
+                state.position().x,
+                state.position().y,
+                state.size().x,
+                state.size().y,
+                None,
+                None,
+                h_instance,
+                None,
+            )?
+        };
 
-        RegisterHotKey(hwnd, 999, MOD_CONTROL, u32::from(VK_0.0))?;
+        RegisterHotKey(hwnd, HOTKEY_ID, MOD_CONTROL, u32::from(VK_0.0))?;
 
         let _ = ShowWindow(hwnd, SW_SHOW);
 
         // Set initial layered window attributes
-        SetLayeredWindowAttributes(hwnd, COLORREF(0), 127, LWA_COLORKEY | LWA_ALPHA).unwrap();
+        SetLayeredWindowAttributes(hwnd, COLORREF(0), 127, LWA_COLORKEY | LWA_ALPHA)?;
 
         let _ = PostMessageW(hwnd, WM_PAINT, WPARAM(0), LPARAM(0));
 
@@ -105,22 +93,12 @@ fn main() -> windows::core::Result<()> {
 
         let mut msg = MSG::default();
         while GetMessageW(&raw mut msg, None, 0, 0).into() {
-            // let _ = TranslateMessage(&msg);
+            let _ = TranslateMessage(&msg);
             DispatchMessageW(&raw const msg);
         }
     }
     Ok(())
 }
-
-// fn cursor_in_rect(rect: &RECT) -> bool {
-//     let pt = CURSOR.with(|c| c.get());
-//     (rect.left..rect.right).contains(&pt.x) && (rect.top..rect.bottom).contains(&pt.y)
-// }
-
-// fn cursor_in_window() -> bool {
-//     let rect = WINDOW_RECT.with(|wr| wr.get());
-//     cursor_in_rect(&rect)
-// }
 
 const fn relative_position(pt: POINT, rect: &RECT) -> POINT {
     POINT {
@@ -129,14 +107,11 @@ const fn relative_position(pt: POINT, rect: &RECT) -> POINT {
     }
 }
 
-fn cursor_in_circle() -> bool {
-    let pt = relative_position(CURSOR.get(), &WINDOW_RECT.get());
-    let dx = (pt.x - CIRCLE_CENTER.x) as f32;
-    let dy = (pt.y - CIRCLE_CENTER.y) as f32;
-    let radius = PHASE.with(|phase| {
-        let phase = phase.get();
-        60.0 + (phase.sin() * 30.0)
-    });
+fn cursor_in_circle(state: &WindowState) -> bool {
+    let pt = relative_position(state.cursor, &state.rect);
+    let dx = (pt.x - state.center().x) as f32;
+    let dy = (pt.y - state.center().y) as f32;
+    let radius = 60.0 + (state.phase.sin() * 30.0);
     dx * dx + dy * dy < radius * radius
 }
 
@@ -144,20 +119,17 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
     unsafe {
         match msg {
             WM_TIMER => {
-                PHASE.with(|p| p.set(p.get() + 0.05));
-                CURSOR.with(|c| {
-                    let mut cursor_pos = POINT::default();
-                    if GetCursorPos(&raw mut cursor_pos).is_ok() {
-                        c.set(cursor_pos);
-                    }
-                });
-                WINDOW_RECT.with(|wr| {
-                    let mut window_rect = RECT::default();
-                    if GetWindowRect(hwnd, &raw mut window_rect).is_ok() {
-                        wr.set(window_rect);
-                    }
-                });
-                HOVER.set(cursor_in_circle());
+                let mut state = WINDOW_STATE.lock().unwrap();
+                state.phase += 0.05;
+                let mut cursor_pos = POINT::default();
+                if GetCursorPos(&raw mut cursor_pos).is_ok() {
+                    state.cursor = cursor_pos;
+                }
+                let mut window_rect = RECT::default();
+                if GetWindowRect(hwnd, &raw mut window_rect).is_ok() {
+                    state.rect = window_rect;
+                }
+                state.hover = cursor_in_circle(&state);
                 let _ = InvalidateRect(hwnd, None, false);
                 LRESULT(0)
             }
@@ -168,44 +140,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let _ = EndPaint(hwnd, &raw const ps);
                 LRESULT(0)
             }
-            // WM_NCHITTEST => {
-            //     println!("WM_NCHITTEST received");
-            //     let cursor_pos = POINT {
-            //         x: (lparam.0 as i16) as i32,
-            //         y: ((lparam.0 >> 16) as i16) as i32,
-            //     };
-
-            //     // Convert screen coordinates to window coordinates
-            //     let mut window_rect = RECT::default();
-            //     if GetWindowRect(hwnd, &mut window_rect).is_ok() {
-            //         let cursor_pos = relative_position(&cursor_pos, &window_rect);
-            //         if is_in_circle(&cursor_pos) {
-            //             dbg!("Hit circle area");
-            //             LRESULT(HTCLIENT as isize)
-            //         } else {
-            //             dbg!("Missed circle area");
-            //             LRESULT(HTTRANSPARENT as isize)
-            //         }
-            //     } else {
-            //         dbg!("Failed to get window rect");
-            //         LRESULT(HTTRANSPARENT as isize)
-            //     }
-            // }
             WM_MOUSEMOVE => {
-                // Timer will handle hover detection, just acknowledge the message
-
-                // Handle dragging if needed
                 if GetAsyncKeyState(i32::from(VK_LBUTTON.0)) < 0 {
-                    let current_pos = CURSOR.get();
-                    let new_x = current_pos.x - (WINDOW_SIZE.w() / 2);
-                    let new_y = current_pos.y - (WINDOW_SIZE.h() / 2);
+                    let state = WINDOW_STATE.lock().unwrap();
+                    let new_x = state.cursor.x - (state.size().x / 2);
+                    let new_y = state.cursor.y - (state.size().y / 2);
                     let _ = SetWindowPos(
                         hwnd,
                         HWND_TOP,
                         new_x,
                         new_y,
-                        WINDOW_SIZE.w(),
-                        WINDOW_SIZE.h(),
+                        state.size().x,
+                        state.size().y,
                         SWP_NOZORDER | SWP_NOACTIVATE,
                     );
                 }
@@ -213,7 +159,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             WM_LBUTTONDOWN => {
                 // Simple response when clicked - could add beep here later
-                println!("Circle clicked!");
+                debug!("Circle clicked!");
                 LRESULT(0)
             }
             WM_SETCURSOR => {
@@ -224,12 +170,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_HOTKEY => {
                 // Focus the window when hotkey is pressed
                 let _ = SetForegroundWindow(hwnd);
-                println!("Hotkey pressed!");
+                debug!("Hotkey pressed!");
                 LRESULT(0)
             }
             WM_KEYDOWN => handle_keys(hwnd, VIRTUAL_KEY(wparam.0 as u16), lparam),
             WM_DESTROY => {
-                let _ = UnregisterHotKey(hwnd, 999);
+                let _ = UnregisterHotKey(hwnd, HOTKEY_ID);
                 let _ = KillTimer(hwnd, 1);
                 PostQuitMessage(0);
                 LRESULT(0)
@@ -255,15 +201,15 @@ fn handle_keys(hwnd: HWND, key: VIRTUAL_KEY, lparam: LPARAM) -> LRESULT {
         }
     }
     if movement != POINT::default() {
-        let current = WINDOW_RECT.get();
+        let current = WINDOW_STATE.lock().unwrap();
         let _ = unsafe {
             SetWindowPos(
                 hwnd,
                 HWND_TOP,
-                current.left + movement.x,
-                current.top + movement.y,
-                WINDOW_SIZE.w(),
-                WINDOW_SIZE.h(),
+                current.rect.left + movement.x,
+                current.rect.top + movement.y,
+                current.size().x,
+                current.size().y,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             )
         };
@@ -278,12 +224,12 @@ fn handle_keys(hwnd: HWND, key: VIRTUAL_KEY, lparam: LPARAM) -> LRESULT {
 unsafe fn draw_gdi(hwnd: HWND) {
     let hdc_screen = GetDC(hwnd);
     let hdc_mem = CreateCompatibleDC(hdc_screen);
-
+    let state = WINDOW_STATE.lock().unwrap();
     let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: WINDOW_SIZE.w(),
-            biHeight: -WINDOW_SIZE.h(),
+            biWidth: state.size().x,
+            biHeight: -state.size().y, // top-down
             biPlanes: 1,
             biBitCount: 32,
             biCompression: BI_RGB.0,
@@ -305,14 +251,14 @@ unsafe fn draw_gdi(hwnd: HWND) {
     let old_bmp = SelectObject(hdc_mem, hbitmap);
 
     if !bits_ptr.is_null() {
-        let buffer_size = (WINDOW_SIZE.w() * WINDOW_SIZE.h() * 4) as usize;
+        let buffer_size = (state.size().x * state.size().y * 4) as usize;
         let dst = std::slice::from_raw_parts_mut(bits_ptr.cast::<u8>(), buffer_size);
 
         // Fill with arbitrary image data (BGRA)
-        let red = ((PHASE.get() % 1.0) * 255.0) as u8;
-        for y in 0..WINDOW_SIZE.h() {
-            for x in 0..WINDOW_SIZE.w() {
-                let i = ((y * WINDOW_SIZE.w() + x) * 4) as usize;
+        let red = ((state.phase % 1.0) * 255.0) as u8;
+        for y in 0..state.size().y {
+            for x in 0..state.size().x {
+                let i = ((y * state.size().x + x) * 4) as usize;
                 dst[i] = (x % 255) as u8; // Blue
                 dst[i + 1] = (y % 255) as u8; // Green
                 dst[i + 2] = red;
@@ -321,7 +267,7 @@ unsafe fn draw_gdi(hwnd: HWND) {
         }
     }
 
-    let pen_color = if HOVER.get() {
+    let pen_color = if state.hover {
         COLORREF(0x0000_FF00) // Green when hovered
     } else {
         COLORREF(0x0000_00FF) // Blue otherwise
@@ -330,13 +276,13 @@ unsafe fn draw_gdi(hwnd: HWND) {
     let old_pen = SelectObject(hdc_mem, hpen);
     let brush = CreateSolidBrush(COLORREF(0x0000_0000));
     let old_brush = SelectObject(hdc_mem, brush);
-    let radius = (60.0 + (PHASE.get().sin() * 30.0)) as i32;
+    let radius = (60.0 + (state.phase.sin() * 30.0)) as i32;
     let _ = Ellipse(
         hdc_mem,
-        CIRCLE_CENTER.x - radius,
-        CIRCLE_CENTER.y - radius,
-        CIRCLE_CENTER.x + radius,
-        CIRCLE_CENTER.y + radius,
+        state.center().x - radius,
+        state.center().y - radius,
+        state.center().x + radius,
+        state.center().y + radius,
     );
     let _ = SelectObject(hdc_mem, old_pen);
     let _ = DeleteObject(hpen);
@@ -348,8 +294,8 @@ unsafe fn draw_gdi(hwnd: HWND) {
         hdc_screen,
         0,
         0,
-        WINDOW_SIZE.w(),
-        WINDOW_SIZE.h(),
+        state.size().x,
+        state.size().y,
         hdc_mem,
         0,
         0,
