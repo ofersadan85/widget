@@ -4,10 +4,10 @@ use ffmpeg_next::{
     software::scaling::{context::Context as Scaler, flag::Flags},
     util::format::pixel,
 };
-use std::sync::{Arc, Mutex};
 use tracing::{debug, info, trace, warn};
 
-use crate::state::WINDOW_STATE;
+use crate::error::Result;
+use crate::state::{FRAME_SYNC, WINDOW_STATE};
 
 pub struct FrameStream {
     pub input: format::context::Input,
@@ -18,7 +18,7 @@ pub struct FrameStream {
 }
 
 impl FrameStream {
-    pub fn new(input: &str) -> Result<Self, ffmpeg::Error> {
+    pub fn new(input: &str) -> Result<Self> {
         let input = format::input(&input)?;
         let video = input
             .streams()
@@ -55,16 +55,19 @@ impl FrameStream {
         })
     }
 
-    pub fn read_frames(&mut self) -> Result<(), ffmpeg::Error> {
+    pub fn read_frames(&mut self) -> Result<()> {
         let mut frame = frame::Video::empty();
         let mut rgb_frame = frame::Video::empty();
+        let mut i = 0;
         for (stream, packet) in self.input.packets() {
             if stream.index() == self.video_index {
                 self.decoder.send_packet(&packet)?;
                 while self.decoder.receive_frame(&mut frame).is_ok() {
                     self.scaler.run(&frame, &mut rgb_frame)?;
-                    let mut state = WINDOW_STATE.lock().unwrap();
+                    let mut state = FRAME_SYNC.wait(WINDOW_STATE.lock().unwrap()).unwrap();
                     std::mem::swap(&mut state.frame, &mut rgb_frame);
+                    trace!("Frame\t{i}");
+                    i += 1;
                 }
             }
         }

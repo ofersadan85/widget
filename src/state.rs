@@ -1,5 +1,7 @@
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Condvar, LazyLock, Mutex};
 use windows::Win32::Foundation::{POINT, RECT};
+
+pub static FRAME_SYNC: LazyLock<Condvar> = LazyLock::new(Condvar::new);
 
 pub static WINDOW_STATE: LazyLock<Mutex<WindowState>> =
     LazyLock::new(|| Mutex::new(WindowState::default()));
@@ -11,6 +13,7 @@ pub struct WindowState {
     pub cursor: POINT,
     pub rect: RECT,
     pub frame: ffmpeg_next::frame::Video,
+    pub fps: i32,
 }
 
 impl Default for WindowState {
@@ -21,12 +24,13 @@ impl Default for WindowState {
             phase: 0.0,
             cursor: POINT::default(),
             rect: RECT {
-                left: 100,
+                left: 900,
                 top: 100,
-                right: 400,
+                right: 1300,
                 bottom: 400,
             },
             frame: ffmpeg_next::frame::Video::empty(),
+            fps: 30,
         }
     }
 }

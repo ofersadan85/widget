@@ -1,6 +1,4 @@
-use ffmpeg_next as ffmpeg;
-use std::sync::{Arc, Mutex};
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 use windows::{
     core::w,
     Win32::{
@@ -35,16 +33,19 @@ mod ff;
 mod state;
 use error::Result;
 use ff::FrameStream;
-use state::{WindowState, WINDOW_STATE};
+use state::{WindowState, FRAME_SYNC, WINDOW_STATE};
 
 const HOTKEY_ID: i32 = 999;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    ffmpeg::init()?;
+    ffmpeg_next::init()?;
 
     std::thread::spawn(move || {
-        if let Err(e) = FrameStream::new("sample-5.mp4").and_then(|mut s| s.read_frames()) {
+        if let Err(e) = FrameStream::new("sample-5.mp4").and_then(|mut s| {
+            WINDOW_STATE.lock().unwrap().fps = s.fps;
+            s.read_frames()
+        }) {
             error!("Error in FFmpeg thread: {}", e);
         }
     });
@@ -61,9 +62,9 @@ fn main() -> Result<()> {
         };
         RegisterClassW(&raw const wc);
 
-        let hwnd = {
+        let (hwnd, frame_ms) = {
             let state = WINDOW_STATE.lock().unwrap();
-            CreateWindowExW(
+            let hwnd = CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, // no WS_EX_TRANSPARENT now
                 class_name,
                 w!("Interactive Transparent Widget"),
@@ -76,7 +77,8 @@ fn main() -> Result<()> {
                 None,
                 h_instance,
                 None,
-            )?
+            )?;
+            (hwnd, (1000 / state.fps) as u32)
         };
 
         RegisterHotKey(hwnd, HOTKEY_ID, MOD_CONTROL, u32::from(VK_0.0))?;
@@ -88,12 +90,12 @@ fn main() -> Result<()> {
 
         let _ = PostMessageW(hwnd, WM_PAINT, WPARAM(0), LPARAM(0));
 
-        // 60 FPS timer
-        SetTimer(hwnd, 1, 16, None);
+        debug!("Setting timer with interval {frame_ms} ms");
+        SetTimer(hwnd, 1, frame_ms, None);
 
         let mut msg = MSG::default();
         while GetMessageW(&raw mut msg, None, 0, 0).into() {
-            let _ = TranslateMessage(&msg);
+            let _ = TranslateMessage(&raw const msg);
             DispatchMessageW(&raw const msg);
         }
     }
@@ -130,10 +132,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     state.rect = window_rect;
                 }
                 state.hover = cursor_in_circle(&state);
+                FRAME_SYNC.notify_one();
                 let _ = InvalidateRect(hwnd, None, false);
                 LRESULT(0)
             }
             WM_PAINT => {
+                debug!("WM_PAINT received");
                 let mut ps = PAINTSTRUCT::default();
                 let _hdc = BeginPaint(hwnd, &raw mut ps);
                 draw_gdi(hwnd);
@@ -224,7 +228,25 @@ fn handle_keys(hwnd: HWND, key: VIRTUAL_KEY, lparam: LPARAM) -> LRESULT {
 unsafe fn draw_gdi(hwnd: HWND) {
     let hdc_screen = GetDC(hwnd);
     let hdc_mem = CreateCompatibleDC(hdc_screen);
+
     let state = WINDOW_STATE.lock().unwrap();
+    let _ = SetWindowPos(
+        hwnd,
+        HWND_TOP,
+        state.rect.left,
+        state.rect.top,
+        state.size().x.max(state.frame.width() as i32),
+        state.size().y.max(state.frame.height() as i32),
+        SWP_NOZORDER | SWP_NOACTIVATE,
+    );
+    debug!(
+        "Drawing at position ({}, {}), size ({}, {})",
+        state.position().x,
+        state.position().y,
+        state.size().x,
+        state.size().y
+    );
+
     let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -255,15 +277,22 @@ unsafe fn draw_gdi(hwnd: HWND) {
         let dst = std::slice::from_raw_parts_mut(bits_ptr.cast::<u8>(), buffer_size);
 
         // Fill with arbitrary image data (BGRA)
-        let red = ((state.phase % 1.0) * 255.0) as u8;
-        for y in 0..state.size().y {
-            for x in 0..state.size().x {
-                let i = ((y * state.size().x + x) * 4) as usize;
-                dst[i] = (x % 255) as u8; // Blue
-                dst[i + 1] = (y % 255) as u8; // Green
-                dst[i + 2] = red;
-                // dst[i + 3] = 255; // Alpha (ignored in SRCCOPY)
+        dbg!(buffer_size);
+        if state.frame.is_empty() {
+            debug!("No frame data available");
+            let red = ((state.phase % 1.0) * 255.0) as u8;
+            for y in 0..state.size().y {
+                for x in 0..state.size().x {
+                    let i = ((y * state.size().x + x) * 4) as usize;
+                    dst[i] = (x % 255) as u8; // Blue
+                    dst[i + 1] = (y % 255) as u8; // Green
+                    dst[i + 2] = red;
+                    // dst[i + 3] = 255; // Alpha (ignored in SRCCOPY)
+                }
             }
+        } else {
+            debug!("{}", state.frame.data(0).len());
+            dst.copy_from_slice(&state.frame.data(0)[..buffer_size]);
         }
     }
 
