@@ -1,5 +1,5 @@
 use std::sync::{Condvar, LazyLock, Mutex};
-use windows::Win32::Foundation::{POINT, RECT};
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 
 pub static FRAME_SYNC: LazyLock<Condvar> = LazyLock::new(Condvar::new);
 
@@ -10,10 +10,12 @@ pub struct WindowState {
     pub title: String,
     pub hover: bool,
     pub phase: f32,
-    pub cursor: POINT,
-    pub rect: RECT,
+    pub cursor: PhysicalPosition<f64>,
+    pub position: PhysicalPosition<i32>,
+    pub size: PhysicalSize<u32>,
     pub frame: ffmpeg_next::frame::Video,
     pub fps: i32,
+    pub rescale_needed: bool,
 }
 
 impl Default for WindowState {
@@ -22,38 +24,21 @@ impl Default for WindowState {
             title: String::from("AmazingWidget"),
             hover: false,
             phase: 0.0,
-            cursor: POINT::default(),
-            rect: RECT {
-                left: 900,
-                top: 100,
-                right: 1300,
-                bottom: 400,
-            },
+            cursor: PhysicalPosition::new(0.0, 0.0),
+            position: PhysicalPosition::new(900, 100),
+            size: PhysicalSize::new(400, 300),
             frame: ffmpeg_next::frame::Video::empty(),
             fps: 30,
+            rescale_needed: false,
         }
     }
 }
 
 impl WindowState {
-    pub fn position(&self) -> POINT {
-        POINT {
-            x: self.rect.left,
-            y: self.rect.top,
-        }
-    }
-
-    pub fn size(&self) -> POINT {
-        POINT {
-            x: self.rect.right - self.rect.left,
-            y: self.rect.bottom - self.rect.top,
-        }
-    }
-
-    pub fn center(&self) -> POINT {
-        POINT {
-            x: self.size().x / 2,
-            y: self.size().y / 2,
+    pub fn center(&self) -> PhysicalPosition<f64> {
+        PhysicalPosition {
+            x: f64::from(self.size.width) / 2.0,
+            y: f64::from(self.size.height) / 2.0,
         }
     }
 }

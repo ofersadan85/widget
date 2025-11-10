@@ -1,31 +1,28 @@
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use std::time::{Duration, Instant};
 use tracing::{debug, error, trace};
-use windows::{
-    core::w,
-    Win32::{
-        Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
-        Graphics::Gdi::{
-            BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, CreatePen, CreateSolidBrush,
-            DeleteDC, DeleteObject, Ellipse, EndPaint, GetDC, InvalidateRect, ReleaseDC,
-            SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
-            PS_SOLID, SRCCOPY,
-        },
-        System::LibraryLoader::GetModuleHandleW,
-        UI::{
-            Input::KeyboardAndMouse::{
-                GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, MOD_CONTROL, VIRTUAL_KEY, VK_0,
-                VK_A, VK_D, VK_ESCAPE, VK_LBUTTON, VK_S, VK_W,
-            },
-            WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-                GetMessageW, GetWindowRect, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage,
-                RegisterClassW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes,
-                SetTimer, SetWindowPos, ShowWindow, TranslateMessage, HWND_TOP, IDC_ARROW,
-                LWA_ALPHA, LWA_COLORKEY, MSG, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WM_DESTROY,
-                WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR,
-                WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-            },
-        },
+use windows::Win32::{
+    Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM},
+    Graphics::Gdi::{
+        BitBlt, CreateCompatibleDC, CreateDIBSection, CreatePen, CreateSolidBrush, DeleteDC,
+        DeleteObject, Ellipse, GetDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
+        BI_RGB, DIB_RGB_COLORS, HDC, PS_SOLID, SRCCOPY,
     },
+    UI::WindowsAndMessaging::{
+        CallWindowProcW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW,
+        SetWindowPos, GWL_WNDPROC, HTCAPTION, HTTRANSPARENT, HWND_TOP, SC_MAXIMIZE, SM_CXSCREEN,
+        SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
+        WM_SYSCOMMAND, WNDPROC,
+    },
+};
+use winit::{
+    application::ApplicationHandler,
+    dpi::{PhysicalPosition, PhysicalSize},
+    event::{ElementState, KeyEvent, MouseButton, WindowEvent},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
+    platform::windows::WindowAttributesExtWindows,
+    window::{Window, WindowAttributes, WindowId, WindowLevel},
 };
 
 mod error;
@@ -35,14 +32,158 @@ use error::Result;
 use ff::FrameStream;
 use state::{WindowState, FRAME_SYNC, WINDOW_STATE};
 
-const HOTKEY_ID: i32 = 999;
+struct App {
+    window: Option<Window>,
+    last_frame_time: Instant,
+    frame_interval: Duration,
+}
+
+impl App {
+    fn new() -> Self {
+        let fps = WINDOW_STATE.lock().unwrap().fps;
+        Self {
+            window: None,
+            last_frame_time: Instant::now(),
+            frame_interval: Duration::from_millis((1000 / fps) as u64),
+        }
+    }
+
+    fn cursor_in_circle(state: &WindowState, cursor_pos: PhysicalPosition<f64>) -> bool {
+        let dx = cursor_pos.x - state.center().x;
+        let dy = cursor_pos.y - state.center().y;
+        let radius = 60.0 + (f64::from(state.phase.sin()) * 30.0);
+        dx * dx + dy * dy < radius * radius
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+
+        let state = WINDOW_STATE.lock().unwrap();
+        let window = event_loop
+            .create_window(
+                WindowAttributes::default()
+                    .with_title(&state.title)
+                    .with_inner_size(state.size)
+                    .with_position(state.position)
+                    .with_decorations(false)
+                    .with_transparent(true)
+                    .with_window_level(WindowLevel::AlwaysOnTop)
+                    .with_skip_taskbar(true),
+            )
+            .unwrap();
+
+        // Set up click-through for non-circle areas
+        setup_click_through(&window);
+
+        self.window = Some(window);
+        debug!("Window created");
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => {
+                debug!("Close requested");
+                event_loop.exit();
+            }
+            WindowEvent::RedrawRequested => {
+                if let Some(window) = &self.window {
+                    draw_gdi(window);
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let mut state = WINDOW_STATE.lock().unwrap();
+                state.cursor = position;
+
+                // position is window-relative, so we can use it directly for hover detection
+                state.hover = Self::cursor_in_circle(&state, position);
+            }
+            WindowEvent::MouseInput {
+                state: element_state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if element_state == ElementState::Pressed {
+                    let state = WINDOW_STATE.lock().unwrap();
+                    if state.hover {
+                        debug!("Circle clicked!");
+                    }
+                }
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(key),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => {
+                if let Some(window) = &self.window {
+                    let mut state = WINDOW_STATE.lock().unwrap();
+                    let mut movement = PhysicalPosition::new(0, 0);
+
+                    match key {
+                        KeyCode::Escape => {
+                            debug!("Escape pressed");
+                            event_loop.exit();
+                        }
+                        KeyCode::KeyW => movement.y = -10,
+                        KeyCode::KeyS => movement.y = 10,
+                        KeyCode::KeyA => movement.x = -10,
+                        KeyCode::KeyD => movement.x = 10,
+                        _ => {}
+                    }
+
+                    if movement.x != 0 || movement.y != 0 {
+                        let new_pos = PhysicalPosition::new(
+                            state.position.x + movement.x,
+                            state.position.y + movement.y,
+                        );
+                        window.set_outer_position(new_pos);
+                        state.position = new_pos;
+                    }
+                }
+            }
+            WindowEvent::Moved(position) => {
+                let mut state = WINDOW_STATE.lock().unwrap();
+                state.position = position;
+            }
+            WindowEvent::Resized(size) => {
+                let mut state = WINDOW_STATE.lock().unwrap();
+                state.size = size;
+                state.rescale_needed = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if now.duration_since(self.last_frame_time) >= self.frame_interval {
+            self.last_frame_time = now;
+
+            let mut state = WINDOW_STATE.lock().unwrap();
+            state.phase += 0.05;
+            FRAME_SYNC.notify_one();
+
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+}
 
 fn main() -> Result<()> {
+    let filename = std::env::args().nth(1).unwrap_or_default();
     tracing_subscriber::fmt::init();
     ffmpeg_next::init()?;
 
     std::thread::spawn(move || {
-        if let Err(e) = FrameStream::new("sample-5.mp4").and_then(|mut s| {
+        if let Err(e) = FrameStream::new(&filename).and_then(|mut s| {
             WINDOW_STATE.lock().unwrap().fps = s.fps;
             s.read_frames()
         }) {
@@ -50,249 +191,16 @@ fn main() -> Result<()> {
         }
     });
 
-    unsafe {
-        let h_instance = GetModuleHandleW(None)?;
-        let class_name = w!("InteractiveWidget");
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
 
-        let wc = WNDCLASSW {
-            hInstance: h_instance.into(),
-            lpszClassName: class_name,
-            lpfnWndProc: Some(wndproc),
-            ..Default::default()
-        };
-        RegisterClassW(&raw const wc);
+    let mut app = App::new();
+    event_loop.run_app(&mut app)?;
 
-        let (hwnd, frame_ms) = {
-            let state = WINDOW_STATE.lock().unwrap();
-            let hwnd = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, // no WS_EX_TRANSPARENT now
-                class_name,
-                w!("Interactive Transparent Widget"),
-                WS_POPUP,
-                state.position().x,
-                state.position().y,
-                state.size().x,
-                state.size().y,
-                None,
-                None,
-                h_instance,
-                None,
-            )?;
-            (hwnd, (1000 / state.fps) as u32)
-        };
-
-        RegisterHotKey(hwnd, HOTKEY_ID, MOD_CONTROL, u32::from(VK_0.0))?;
-
-        let _ = ShowWindow(hwnd, SW_SHOW);
-
-        // Set initial layered window attributes
-        SetLayeredWindowAttributes(hwnd, COLORREF(0), 127, LWA_COLORKEY | LWA_ALPHA)?;
-
-        let _ = PostMessageW(hwnd, WM_PAINT, WPARAM(0), LPARAM(0));
-
-        debug!("Setting timer with interval {frame_ms} ms");
-        SetTimer(hwnd, 1, frame_ms, None);
-
-        let mut msg = MSG::default();
-        while GetMessageW(&raw mut msg, None, 0, 0).into() {
-            let _ = TranslateMessage(&raw const msg);
-            DispatchMessageW(&raw const msg);
-        }
-    }
     Ok(())
 }
 
-const fn relative_position(pt: POINT, rect: &RECT) -> POINT {
-    POINT {
-        x: pt.x - rect.left,
-        y: pt.y - rect.top,
-    }
-}
-
-fn cursor_in_circle(state: &WindowState) -> bool {
-    let pt = relative_position(state.cursor, &state.rect);
-    let dx = (pt.x - state.center().x) as f32;
-    let dy = (pt.y - state.center().y) as f32;
-    let radius = 60.0 + (state.phase.sin() * 30.0);
-    dx * dx + dy * dy < radius * radius
-}
-
-extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    unsafe {
-        match msg {
-            WM_TIMER => {
-                let mut state = WINDOW_STATE.lock().unwrap();
-                state.phase += 0.05;
-                let mut cursor_pos = POINT::default();
-                if GetCursorPos(&raw mut cursor_pos).is_ok() {
-                    state.cursor = cursor_pos;
-                }
-                let mut window_rect = RECT::default();
-                if GetWindowRect(hwnd, &raw mut window_rect).is_ok() {
-                    state.rect = window_rect;
-                }
-                state.hover = cursor_in_circle(&state);
-                FRAME_SYNC.notify_one();
-                let _ = InvalidateRect(hwnd, None, false);
-                LRESULT(0)
-            }
-            WM_PAINT => {
-                let mut ps = PAINTSTRUCT::default();
-                let _hdc = BeginPaint(hwnd, &raw mut ps);
-                draw_gdi(hwnd);
-                let _ = EndPaint(hwnd, &raw const ps);
-                LRESULT(0)
-            }
-            WM_MOUSEMOVE => {
-                if GetAsyncKeyState(i32::from(VK_LBUTTON.0)) < 0 {
-                    let state = WINDOW_STATE.lock().unwrap();
-                    let new_x = state.cursor.x - (state.size().x / 2);
-                    let new_y = state.cursor.y - (state.size().y / 2);
-                    let _ = SetWindowPos(
-                        hwnd,
-                        HWND_TOP,
-                        new_x,
-                        new_y,
-                        state.size().x,
-                        state.size().y,
-                        SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
-                }
-                LRESULT(0)
-            }
-            WM_LBUTTONDOWN => {
-                // Simple response when clicked - could add beep here later
-                debug!("Circle clicked!");
-                LRESULT(0)
-            }
-            WM_SETCURSOR => {
-                // Always use arrow cursor to prevent busy cursor
-                SetCursor(LoadCursorW(None, IDC_ARROW).unwrap_or_default());
-                LRESULT(1) // Indicate we handled the cursor
-            }
-            WM_HOTKEY => {
-                // Focus the window when hotkey is pressed
-                let _ = SetForegroundWindow(hwnd);
-                debug!("Hotkey pressed!");
-                LRESULT(0)
-            }
-            WM_KEYDOWN => handle_keys(hwnd, VIRTUAL_KEY(wparam.0 as u16), lparam),
-            WM_DESTROY => {
-                let _ = UnregisterHotKey(hwnd, HOTKEY_ID);
-                let _ = KillTimer(hwnd, 1);
-                PostQuitMessage(0);
-                LRESULT(0)
-            }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-        }
-    }
-}
-
-fn handle_keys(hwnd: HWND, key: VIRTUAL_KEY, lparam: LPARAM) -> LRESULT {
-    let mut handled = true;
-    let mut movement = POINT::default();
-    match key {
-        VK_ESCAPE => unsafe {
-            let _ = DestroyWindow(hwnd);
-        },
-        VK_W => movement.y -= 10,
-        VK_S => movement.y += 10,
-        VK_A => movement.x -= 10,
-        VK_D => movement.x += 10,
-        _ => {
-            handled = false;
-        }
-    }
-    if movement != POINT::default() {
-        let current = WINDOW_STATE.lock().unwrap();
-        let _ = unsafe {
-            SetWindowPos(
-                hwnd,
-                HWND_TOP,
-                current.rect.left + movement.x,
-                current.rect.top + movement.y,
-                current.size().x,
-                current.size().y,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            )
-        };
-    }
-    if handled {
-        LRESULT(0)
-    } else {
-        unsafe { DefWindowProcW(hwnd, WM_KEYDOWN, WPARAM(key.0 as usize), lparam) }
-    }
-}
-
-unsafe fn draw_gdi(hwnd: HWND) {
-    let hdc_screen = GetDC(hwnd);
-    let hdc_mem = CreateCompatibleDC(hdc_screen);
-
-    let state = WINDOW_STATE.lock().unwrap();
-    let _ = SetWindowPos(
-        hwnd,
-        HWND_TOP,
-        state.rect.left,
-        state.rect.top,
-        state.size().x.max(state.frame.width() as i32),
-        state.size().y.max(state.frame.height() as i32),
-        SWP_NOZORDER | SWP_NOACTIVATE,
-    );
-    trace!(
-        "Drawing at position ({}, {}), size ({}, {})",
-        state.position().x,
-        state.position().y,
-        state.size().x,
-        state.size().y
-    );
-
-    let bmi = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: state.size().x,
-            biHeight: -state.size().y, // top-down
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-    let hbitmap = CreateDIBSection(
-        hdc_mem,
-        &raw const bmi,
-        DIB_RGB_COLORS,
-        &raw mut bits_ptr,
-        HANDLE::default(),
-        0,
-    )
-    .unwrap_or_default();
-    let old_bmp = SelectObject(hdc_mem, hbitmap);
-
-    if !bits_ptr.is_null() {
-        let buffer_size = (state.size().x * state.size().y * 4) as usize;
-        let dst = std::slice::from_raw_parts_mut(bits_ptr.cast::<u8>(), buffer_size);
-
-        // Fill with arbitrary image data (BGRA)
-        if state.frame.is_empty() {
-            trace!("No frame data available");
-            let red = ((state.phase % 1.0) * 255.0) as u8;
-            for y in 0..state.size().y {
-                for x in 0..state.size().x {
-                    let i = ((y * state.size().x + x) * 4) as usize;
-                    dst[i] = (x % 255) as u8; // Blue
-                    dst[i + 1] = (y % 255) as u8; // Green
-                    dst[i + 2] = red;
-                    // dst[i + 3] = 255; // Alpha (ignored in SRCCOPY)
-                }
-            }
-        } else {
-            dst.copy_from_slice(&state.frame.data(0)[..buffer_size]);
-        }
-    }
-
+unsafe fn draw_pulsing_circle(state: &WindowState, hdc_mem: HDC) {
     let pen_color = if state.hover {
         COLORREF(0x0000_FF00) // Green when hovered
     } else {
@@ -303,34 +211,259 @@ unsafe fn draw_gdi(hwnd: HWND) {
     let brush = CreateSolidBrush(COLORREF(0x0000_0000));
     let old_brush = SelectObject(hdc_mem, brush);
     let radius = (60.0 + (state.phase.sin() * 30.0)) as i32;
+    let center = state.center();
     let _ = Ellipse(
         hdc_mem,
-        state.center().x - radius,
-        state.center().y - radius,
-        state.center().x + radius,
-        state.center().y + radius,
+        center.x as i32 - radius,
+        center.y as i32 - radius,
+        center.x as i32 + radius,
+        center.y as i32 + radius,
     );
     let _ = SelectObject(hdc_mem, old_pen);
     let _ = DeleteObject(hpen);
     let _ = SelectObject(hdc_mem, old_brush);
     let _ = DeleteObject(brush);
+}
 
-    // Blit to screen
-    let _ = BitBlt(
-        hdc_screen,
-        0,
-        0,
-        state.size().x,
-        state.size().y,
-        hdc_mem,
-        0,
-        0,
-        SRCCOPY,
-    );
+fn draw_gdi(window: &Window) {
+    unsafe {
+        let hwnd = match window.window_handle().unwrap().as_raw() {
+            RawWindowHandle::Win32(handle) => HWND(handle.hwnd.get() as _),
+            _ => unimplemented!("Unsupported platform"),
+        };
 
-    // Clean up
-    SelectObject(hdc_mem, old_bmp);
-    let _ = DeleteObject(hbitmap);
-    let _ = DeleteDC(hdc_mem);
-    ReleaseDC(hwnd, hdc_screen);
+        let hdc_screen = GetDC(hwnd);
+        let hdc_mem = CreateCompatibleDC(hdc_screen);
+
+        let state = WINDOW_STATE.lock().unwrap();
+        let width = state.size.width as i32;
+        let height = state.size.height as i32;
+
+        trace!(
+            "Drawing at position ({}, {}), size ({}, {}) frame: {}x{}",
+            state.position.x,
+            state.position.y,
+            width,
+            height,
+            state.frame.width(),
+            state.frame.height()
+        );
+
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height, // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        let hbitmap = CreateDIBSection(
+            hdc_mem,
+            &raw const bmi,
+            DIB_RGB_COLORS,
+            &raw mut bits_ptr,
+            HANDLE::default(),
+            0,
+        )
+        .unwrap_or_default();
+        let old_bmp = SelectObject(hdc_mem, hbitmap);
+
+        if !bits_ptr.is_null() {
+            let buffer_size = (width * height * 4) as usize;
+            let dst = std::slice::from_raw_parts_mut(bits_ptr.cast::<u8>(), buffer_size);
+
+            // Fill with arbitrary image data (BGRA)
+            if state.frame.is_empty() {
+                trace!("No frame data available");
+                let red = ((state.phase % 1.0) * 255.0) as u8;
+                for y in 0..height {
+                    for x in 0..width {
+                        let i = ((y * width + x) * 4) as usize;
+                        dst[i] = (x % 255) as u8; // Blue
+                        dst[i + 1] = (y % 255) as u8; // Green
+                        dst[i + 2] = red;
+                    }
+                }
+            } else {
+                let frame_data = state.frame.data(0);
+                let frame_width = state.frame.width() as i32;
+                let frame_height = state.frame.height() as i32;
+
+                // If frame dimensions match window, direct copy
+                if frame_width == width && frame_height == height {
+                    let copy_size = buffer_size.min(frame_data.len());
+                    if copy_size > 0 {
+                        dst[..copy_size].copy_from_slice(&frame_data[..copy_size]);
+                    }
+                } else {
+                    // Frame size mismatch - fill with black and copy what we can
+                    trace!(
+                        "Frame size mismatch: {}x{} vs window {}x{}",
+                        frame_width,
+                        frame_height,
+                        width,
+                        height
+                    );
+                    dst.fill(0);
+
+                    // Copy line by line to handle size mismatch
+                    let min_height = frame_height.min(height);
+                    let min_width = frame_width.min(width);
+                    for y in 0..min_height {
+                        let src_offset = (y * frame_width * 4) as usize;
+                        let dst_offset = (y * width * 4) as usize;
+                        let line_size = (min_width * 4) as usize;
+
+                        if src_offset + line_size <= frame_data.len()
+                            && dst_offset + line_size <= dst.len()
+                        {
+                            dst[dst_offset..dst_offset + line_size]
+                                .copy_from_slice(&frame_data[src_offset..src_offset + line_size]);
+                        }
+                    }
+                }
+            }
+        }
+
+        draw_pulsing_circle(&state, hdc_mem);
+
+        // Blit to screen
+        let _ = BitBlt(hdc_screen, 0, 0, width, height, hdc_mem, 0, 0, SRCCOPY);
+
+        // Clean up
+        SelectObject(hdc_mem, old_bmp);
+        let _ = DeleteObject(hbitmap);
+        let _ = DeleteDC(hdc_mem);
+        ReleaseDC(hwnd, hdc_screen);
+    }
+}
+
+static mut OLD_WNDPROC: Option<WNDPROC> = None;
+
+unsafe extern "system" fn custom_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_NCHITTEST {
+        // Get the cursor position from lparam (screen coordinates)
+        let screen_x = i32::from((lparam.0 & 0xFFFF) as i16);
+        let screen_y = i32::from(((lparam.0 >> 16) & 0xFFFF) as i16);
+
+        // Get window position to convert to window coordinates
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &raw mut rect).is_ok() {
+            let window_x = screen_x - rect.left;
+            let window_y = screen_y - rect.top;
+
+            // Check if the cursor is over the circle
+            let state = WINDOW_STATE.lock().unwrap();
+            let cursor_pos = PhysicalPosition::new(f64::from(window_x), f64::from(window_y));
+
+            if App::cursor_in_circle(&state, cursor_pos) {
+                return LRESULT(HTTRANSPARENT as isize); // Circle is click-through
+            }
+            return LRESULT(HTCAPTION as isize); // Background is draggable
+        }
+    }
+
+    // Intercept maximize command and double-click to go fullscreen instead
+    if msg == WM_SYSCOMMAND && (wparam.0 & 0xFFF0) == SC_MAXIMIZE as usize {
+        toggle_fullscreen(hwnd);
+        return LRESULT(0);
+    }
+
+    if msg == WM_NCLBUTTONDBLCLK {
+        toggle_fullscreen(hwnd);
+        return LRESULT(0);
+    }
+
+    // Call the original window procedure
+    if let Some(old_proc) = OLD_WNDPROC {
+        CallWindowProcW(old_proc, hwnd, msg, wparam, lparam)
+    } else {
+        LRESULT(0)
+    }
+}
+
+static mut IS_FULLSCREEN: bool = false;
+static mut SAVED_POSITION: (i32, i32) = (0, 0);
+static mut SAVED_SIZE: (i32, i32) = (0, 0);
+
+unsafe fn toggle_fullscreen(hwnd: HWND) {
+    use windows::Win32::Foundation::RECT;
+
+    if IS_FULLSCREEN {
+        // Restore to normal size
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOP,
+            SAVED_POSITION.0,
+            SAVED_POSITION.1,
+            SAVED_SIZE.0,
+            SAVED_SIZE.1,
+            SWP_FRAMECHANGED | SWP_NOACTIVATE,
+        );
+        IS_FULLSCREEN = false;
+
+        // Update state
+        let mut state = WINDOW_STATE.lock().unwrap();
+        state.position = PhysicalPosition::new(SAVED_POSITION.0, SAVED_POSITION.1);
+        state.size = PhysicalSize::new(SAVED_SIZE.0 as u32, SAVED_SIZE.1 as u32);
+        state.rescale_needed = true;
+    } else {
+        // Save current position and size
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &raw mut rect).is_ok() {
+            SAVED_POSITION = (rect.left, rect.top);
+            SAVED_SIZE = (rect.right - rect.left, rect.bottom - rect.top);
+        }
+
+        // Get full screen dimensions (including taskbar)
+        let screen_width = GetSystemMetrics(SM_CXSCREEN);
+        let screen_height = GetSystemMetrics(SM_CYSCREEN);
+
+        // Set to fullscreen
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOP,
+            0,
+            0,
+            screen_width,
+            screen_height,
+            SWP_FRAMECHANGED | SWP_NOACTIVATE,
+        );
+        IS_FULLSCREEN = true;
+
+        // Update state
+        let mut state = WINDOW_STATE.lock().unwrap();
+        state.position = PhysicalPosition::new(0, 0);
+        state.size = PhysicalSize::new(screen_width as u32, screen_height as u32);
+        state.rescale_needed = true;
+    }
+}
+
+fn setup_click_through(window: &Window) {
+    unsafe {
+        let hwnd = match window.window_handle().unwrap().as_raw() {
+            RawWindowHandle::Win32(handle) => HWND(handle.hwnd.get() as _),
+            _ => return,
+        };
+
+        // Store the original window procedure
+        let old_proc = GetWindowLongPtrW(hwnd, GWL_WNDPROC);
+        OLD_WNDPROC = Some(std::mem::transmute::<isize, WNDPROC>(old_proc));
+
+        // Set our custom window procedure
+        SetWindowLongPtrW(hwnd, GWL_WNDPROC, custom_wndproc as usize as isize);
+
+        debug!("Click-through enabled");
+    }
 }
