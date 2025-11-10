@@ -73,6 +73,8 @@ impl FrameStream {
         }
         self.decoder.send_eof()?;
         debug!("End of stream reached");
+        rgb_frame = frame::Video::empty();
+        std::mem::swap(&mut WINDOW_STATE.lock().unwrap().frame, &mut rgb_frame);
         Ok(())
     }
 }

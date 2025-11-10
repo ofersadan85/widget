@@ -1,4 +1,4 @@
-use tracing::{debug, error};
+use tracing::{debug, error, trace};
 use windows::{
     core::w,
     Win32::{
@@ -137,7 +137,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
             WM_PAINT => {
-                debug!("WM_PAINT received");
                 let mut ps = PAINTSTRUCT::default();
                 let _hdc = BeginPaint(hwnd, &raw mut ps);
                 draw_gdi(hwnd);
@@ -239,7 +238,7 @@ unsafe fn draw_gdi(hwnd: HWND) {
         state.size().y.max(state.frame.height() as i32),
         SWP_NOZORDER | SWP_NOACTIVATE,
     );
-    debug!(
+    trace!(
         "Drawing at position ({}, {}), size ({}, {})",
         state.position().x,
         state.position().y,
@@ -277,9 +276,8 @@ unsafe fn draw_gdi(hwnd: HWND) {
         let dst = std::slice::from_raw_parts_mut(bits_ptr.cast::<u8>(), buffer_size);
 
         // Fill with arbitrary image data (BGRA)
-        dbg!(buffer_size);
         if state.frame.is_empty() {
-            debug!("No frame data available");
+            trace!("No frame data available");
             let red = ((state.phase % 1.0) * 255.0) as u8;
             for y in 0..state.size().y {
                 for x in 0..state.size().x {
@@ -291,7 +289,6 @@ unsafe fn draw_gdi(hwnd: HWND) {
                 }
             }
         } else {
-            debug!("{}", state.frame.data(0).len());
             dst.copy_from_slice(&state.frame.data(0)[..buffer_size]);
         }
     }
