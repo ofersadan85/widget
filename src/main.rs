@@ -1,6 +1,20 @@
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, trace};
+use windows::Win32::{
+    Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM},
+    Graphics::Gdi::{
+        BitBlt, CreateCompatibleDC, CreateDIBSection, CreatePen, CreateSolidBrush, DeleteDC,
+        DeleteObject, Ellipse, GetDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
+        BI_RGB, DIB_RGB_COLORS, HDC, PS_SOLID, SRCCOPY,
+    },
+    UI::WindowsAndMessaging::{
+        CallWindowProcW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW,
+        SetWindowPos, GWL_WNDPROC, HTCAPTION, HTTRANSPARENT, HWND_TOP, SC_MAXIMIZE, SM_CXSCREEN,
+        SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
+        WM_SYSCOMMAND, WNDPROC,
+    },
+};
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
@@ -187,11 +201,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn draw_pulsing_circle(state: &WindowState, hdc_mem: &w::HDC) {
+unsafe fn draw_pulsing_circle(state: &WindowState, hdc_mem: HDC) {
     let pen_color = if state.hover {
-        co::COLORREF::new(0, 255, 0) // Green when hovered
+        COLORREF(0x0000_FF00) // Green when hovered
     } else {
-        co::COLORREF::new(255, 0, 0) // Red otherwise (note: BGR order)
+        COLORREF(0x0000_00FF) // Blue otherwise
     };
     let hpen = CreatePen(PS_SOLID, 3, pen_color);
     let old_pen = SelectObject(hdc_mem, hpen.into());
@@ -342,21 +356,22 @@ fn draw_gdi(window: &Window) {
     }
 }
 
-static mut OLD_WNDPROC: Option<isize> = None;
+static mut OLD_WNDPROC: Option<WNDPROC> = None;
 
-extern "system" fn custom_wndproc(
-    hwnd: w::HWND,
-    msg: co::WM,
-    wparam: usize,
-    lparam: isize,
-) -> isize {
-    if msg == co::WM::NCHITTEST {
+unsafe extern "system" fn custom_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_NCHITTEST {
         // Get the cursor position from lparam (screen coordinates)
-        let screen_x = i32::from((lparam & 0xFFFF) as i16);
-        let screen_y = i32::from(((lparam >> 16) & 0xFFFF) as i16);
+        let screen_x = i32::from((lparam.0 & 0xFFFF) as i16);
+        let screen_y = i32::from(((lparam.0 >> 16) & 0xFFFF) as i16);
 
         // Get window position to convert to window coordinates
-        if let Ok(rect) = hwnd.GetWindowRect() {
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &raw mut rect).is_ok() {
             let window_x = screen_x - rect.left;
             let window_y = screen_y - rect.top;
 
@@ -365,9 +380,9 @@ extern "system" fn custom_wndproc(
             let cursor_pos = PhysicalPosition::new(f64::from(window_x), f64::from(window_y));
 
             if App::cursor_in_circle(&state, cursor_pos) {
-                return co::HT::TRANSPARENT.raw() as isize; // Circle is click-through
+                return LRESULT(HTTRANSPARENT as isize); // Circle is click-through
             }
-            return co::HT::CAPTION.raw() as isize; // Background is draggable
+            return LRESULT(HTCAPTION as isize); // Background is draggable
         }
     }
 
@@ -383,12 +398,10 @@ extern "system" fn custom_wndproc(
     }
 
     // Call the original window procedure
-    unsafe {
-        if let Some(old_proc) = OLD_WNDPROC {
-            w::CallWindowProc(old_proc, hwnd, msg.raw(), wparam, lparam)
-        } else {
-            0
-        }
+    if let Some(old_proc) = OLD_WNDPROC {
+        CallWindowProcW(old_proc, hwnd, msg, wparam, lparam)
+    } else {
+        LRESULT(0)
     }
 }
 
@@ -449,15 +462,12 @@ unsafe fn toggle_fullscreen(hwnd: HWND) {
 }
 
 fn setup_click_through(window: &Window) {
-    let hwnd = match window.window_handle().unwrap().as_raw() {
-        RawWindowHandle::Win32(handle) => w::HWND::from_ptr(handle.hwnd.get() as _),
-        _ => {
-            error!("Unsupported platform for click-through");
-            return;
-        }
-    };
-
     unsafe {
+        let hwnd = match window.window_handle().unwrap().as_raw() {
+            RawWindowHandle::Win32(handle) => HWND(handle.hwnd.get() as _),
+            _ => return,
+        };
+
         // Store the original window procedure
         let old_proc = GetWindowLongPtrW(hwnd, GWL_WNDPROC);
         OLD_WNDPROC = Some(std::mem::transmute::<isize, WNDPROC>(old_proc));
