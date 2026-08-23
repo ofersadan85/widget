@@ -6,6 +6,7 @@ pub static FRAME_SYNC: LazyLock<Condvar> = LazyLock::new(Condvar::new);
 pub static WINDOW_STATE: LazyLock<Mutex<WindowState>> =
     LazyLock::new(|| Mutex::new(WindowState::default()));
 
+#[derive(Clone)]
 pub struct WindowState {
     pub title: String,
     pub hover: bool,
@@ -36,8 +37,8 @@ impl Default for WindowState {
             rescale_needed: false,
             is_fullscreen: false,
             old_proc: None,
-            old_position: PhysicalPosition::new(0, 0),
-            old_size: PhysicalSize::new(0, 0),
+            old_position: PhysicalPosition::new(900, 100),
+            old_size: PhysicalSize::new(400, 300),
         }
     }
 }

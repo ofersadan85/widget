@@ -28,6 +28,7 @@ struct App {
     window: Option<Window>,
     last_frame_time: Instant,
     frame_interval: Duration,
+    bitmap_buffer: Vec<u8>,
 }
 
 impl App {
@@ -37,6 +38,7 @@ impl App {
             window: None,
             last_frame_time: Instant::now(),
             frame_interval: Duration::from_millis((1000 / fps) as u64),
+            bitmap_buffer: Vec::new(),
         }
     }
 
@@ -86,7 +88,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 if let Some(window) = &self.window {
-                    if let Err(err) = draw_gdi(window) {
+                    if let Err(err) = draw_gdi(window, &mut self.bitmap_buffer) {
                         error!("draw_gdi failed: {err}");
                     }
                 }
@@ -222,7 +224,7 @@ fn draw_pulsing_circle(
     Ok(())
 }
 
-fn draw_gdi(window: &Window) -> Result<()> {
+fn draw_gdi(window: &Window, bitmap_buffer: &mut Vec<u8>) -> Result<()> {
     let hwnd = match window
         .window_handle()
         .expect("tried to access window handle on another thread")
@@ -234,8 +236,9 @@ fn draw_gdi(window: &Window) -> Result<()> {
     };
     let hdc_screen = hwnd.GetDC()?;
     let hdc_mem = hdc_screen.CreateCompatibleDC()?;
-    let (width, height, hover, phase, center, frame_width, frame_height, frame_data) = {
+    let (position, width, height, hover, phase, center, frame_width, frame_height, frame_data) = {
         let state = WINDOW_STATE.lock().expect("window state lock");
+        let position = state.position;
         let width = state.size.width as i32;
         let height = state.size.height as i32;
         let center = state.center();
@@ -247,6 +250,7 @@ fn draw_gdi(window: &Window) -> Result<()> {
             state.frame.data(0).to_vec()
         };
         (
+            position,
             width,
             height,
             state.hover,
@@ -259,8 +263,8 @@ fn draw_gdi(window: &Window) -> Result<()> {
     };
     trace!(
         "Drawing at position ({}, {}), size ({}, {}) frame: {}x{}",
-        0,
-        0,
+        position.x,
+        position.y,
         width,
         height,
         frame_width,
@@ -268,24 +272,24 @@ fn draw_gdi(window: &Window) -> Result<()> {
     );
 
     let buffer_size = (width * height * 4) as usize;
-    let mut bitmap_data = vec![0u8; buffer_size];
+    bitmap_buffer.resize(buffer_size, 0);
 
     // Fill the bitmap buffer with BGRA pixel data.
     if frame_data.is_empty() {
-        trace!("No frame data available");
         let red = ((phase % 1.0) * 255.0) as u8;
         for y in 0..height {
             for x in 0..width {
                 let i = ((y * width + x) * 4) as usize;
-                bitmap_data[i] = (x % 255) as u8;
-                bitmap_data[i + 1] = (y % 255) as u8;
-                bitmap_data[i + 2] = red;
+                bitmap_buffer[i] = (x % 255) as u8;
+                bitmap_buffer[i + 1] = (y % 255) as u8;
+                bitmap_buffer[i + 2] = red;
             }
         }
+        trace!("No frame data available, drawing {} gradient", bitmap_buffer.len());
     } else if frame_width == width && frame_height == height {
         let copy_size = buffer_size.min(frame_data.len());
         if copy_size > 0 {
-            bitmap_data[..copy_size].copy_from_slice(&frame_data[..copy_size]);
+            bitmap_buffer[..copy_size].copy_from_slice(&frame_data[..copy_size]);
         }
     } else {
         trace!(
@@ -304,9 +308,9 @@ fn draw_gdi(window: &Window) -> Result<()> {
             let line_size = (min_width * 4) as usize;
 
             if src_offset + line_size <= frame_data.len()
-                && dst_offset + line_size <= bitmap_data.len()
+                && dst_offset + line_size <= bitmap_buffer.len()
             {
-                bitmap_data[dst_offset..dst_offset + line_size]
+                bitmap_buffer[dst_offset..dst_offset + line_size]
                     .copy_from_slice(&frame_data[src_offset..src_offset + line_size]);
             }
         }
@@ -323,7 +327,7 @@ fn draw_gdi(window: &Window) -> Result<()> {
         &bitmap,
         0,
         height as u32,
-        &bitmap_data,
+        &bitmap_buffer,
         &bmi,
         co::DIB::RGB_COLORS,
     )?;
