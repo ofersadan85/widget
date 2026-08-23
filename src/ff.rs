@@ -102,7 +102,7 @@ impl FrameStream {
                     self.scaler.run(&frame, &mut rgb_frame)?;
 
                     let mut state = FRAME_SYNC.wait(WINDOW_STATE.lock().unwrap()).unwrap();
-                    state.frame.clone_from(&rgb_frame);
+                    state.frame = rgb_frame;
                     trace!("Frame\t{i}");
                     i += 1;
                 }
