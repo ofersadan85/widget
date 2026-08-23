@@ -16,6 +16,10 @@ pub struct WindowState {
     pub frame: ffmpeg_next::frame::Video,
     pub fps: i32,
     pub rescale_needed: bool,
+    pub is_fullscreen: bool,
+    pub old_proc: Option<winsafe::WNDPROC>,
+    pub old_position: PhysicalPosition<i32>,
+    pub old_size: PhysicalSize<u32>,
 }
 
 impl Default for WindowState {
@@ -30,6 +34,10 @@ impl Default for WindowState {
             frame: ffmpeg_next::frame::Video::empty(),
             fps: 30,
             rescale_needed: false,
+            is_fullscreen: false,
+            old_proc: None,
+            old_position: PhysicalPosition::new(0, 0),
+            old_size: PhysicalSize::new(0, 0),
         }
     }
 }

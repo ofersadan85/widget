@@ -3,7 +3,9 @@ pub enum Error {
     #[error(transparent)]
     FFmpeg(#[from] ffmpeg_next::Error),
     #[error(transparent)]
-    Windows(#[from] windows::core::Error),
+    Winsafe(#[from] winsafe::co::ERROR),
+    // #[error(transparent)]
+    // WindowHandleError(#[from] winit::window::WindowHandleError),
     #[error(transparent)]
     EventLoop(#[from] winit::error::EventLoopError),
 }

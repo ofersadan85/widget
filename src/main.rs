@@ -1,20 +1,6 @@
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, trace};
-use windows::Win32::{
-    Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM},
-    Graphics::Gdi::{
-        BitBlt, CreateCompatibleDC, CreateDIBSection, CreatePen, CreateSolidBrush, DeleteDC,
-        DeleteObject, Ellipse, GetDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
-        BI_RGB, DIB_RGB_COLORS, HDC, PS_SOLID, SRCCOPY,
-    },
-    UI::WindowsAndMessaging::{
-        CallWindowProcW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW,
-        SetWindowPos, GWL_WNDPROC, HTCAPTION, HTTRANSPARENT, HWND_TOP, SC_MAXIMIZE, SM_CXSCREEN,
-        SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
-        WM_SYSCOMMAND, WNDPROC,
-    },
-};
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
@@ -24,13 +10,19 @@ use winit::{
     platform::windows::WindowAttributesExtWindows,
     window::{Window, WindowAttributes, WindowId, WindowLevel},
 };
+use winsafe::{
+    co, guard::DeleteDCGuard, GetSystemMetrics, HwndPlace, SysResult, BITMAPINFO, HBRUSH, HPEN,
+    HWND, POINT, RECT, SIZE, WNDPROC,
+};
 
 mod error;
-mod ff;
-mod state;
 use error::Result;
+mod ff;
 use ff::FrameStream;
+mod state;
 use state::{WindowState, FRAME_SYNC, WINDOW_STATE};
+mod colors;
+use colors::{BLACK, BLUE, GREEN};
 
 struct App {
     window: Option<Window>,
@@ -91,7 +83,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 if let Some(window) = &self.window {
-                    draw_gdi(window);
+                    if let Err(err) = draw_gdi(window) {
+                        error!("draw_gdi failed: {err}");
+                    }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -166,9 +160,11 @@ impl ApplicationHandler for App {
         if now.duration_since(self.last_frame_time) >= self.frame_interval {
             self.last_frame_time = now;
 
-            let mut state = WINDOW_STATE.lock().unwrap();
-            state.phase += 0.05;
-            FRAME_SYNC.notify_one();
+            {
+                let mut state = WINDOW_STATE.lock().unwrap();
+                state.phase += 0.05;
+                FRAME_SYNC.notify_one();
+            }
 
             if let Some(window) = &self.window {
                 window.request_redraw();
@@ -201,178 +197,161 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-unsafe fn draw_pulsing_circle(state: &WindowState, hdc_mem: HDC) {
-    let pen_color = if state.hover {
-        COLORREF(0x0000_FF00) // Green when hovered
-    } else {
-        COLORREF(0x0000_00FF) // Blue otherwise
+fn draw_pulsing_circle(
+    hover: bool,
+    phase: f32,
+    center: PhysicalPosition<f64>,
+    hdc_mem: &DeleteDCGuard,
+) -> SysResult<()> {
+    let pen_color = if hover { GREEN } else { BLUE };
+    let hpen = HPEN::CreatePen(co::PS::SOLID, 3, pen_color)?;
+    let _pen_guard = hdc_mem.SelectObject(&*hpen)?;
+    let brush = HBRUSH::CreateSolidBrush(BLACK)?;
+    let _brush_guard = hdc_mem.SelectObject(&*brush)?;
+    let radius = (60.0 + (phase.sin() * 30.0)) as i32;
+    let ellipse_rect = RECT {
+        left: center.x as i32 - radius,
+        top: center.y as i32 - radius,
+        right: center.x as i32 + radius,
+        bottom: center.y as i32 + radius,
     };
-    let hpen = CreatePen(PS_SOLID, 3, pen_color);
-    let old_pen = SelectObject(hdc_mem, hpen.into());
-    let brush = CreateSolidBrush(COLORREF(0x0000_0000));
-    let old_brush = SelectObject(hdc_mem, brush.into());
-    let radius = (60.0 + (state.phase.sin() * 30.0)) as i32;
-    let center = state.center();
-
-    let _ = Ellipse(
-        hdc_mem,
-        center.x as i32 - radius,
-        center.y as i32 - radius,
-        center.x as i32 + radius,
-        center.y as i32 + radius,
-    );
-    let _ = SelectObject(hdc_mem, old_pen);
-    let _ = DeleteObject(hpen.into());
-    let _ = SelectObject(hdc_mem, old_brush);
-    let _ = DeleteObject(brush.into());
+    hdc_mem.Ellipse(ellipse_rect)?;
+    Ok(())
 }
 
-fn draw_gdi(window: &Window) {
-    unsafe {
-        let hwnd = match window.window_handle().unwrap().as_raw() {
-            RawWindowHandle::Win32(handle) => HWND(handle.hwnd.get() as _),
-            _ => unimplemented!("Unsupported platform"),
-        };
-
-        let hdc_screen = GetDC(Some(hwnd));
-        let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
-
-        let state = WINDOW_STATE.lock().unwrap();
+fn draw_gdi(window: &Window) -> Result<()> {
+    let hwnd = match window
+        .window_handle()
+        .expect("tried to access window handle on another thread")
+        .as_raw()
+    {
+        // Safety: We are accessing a valid HWND pointer from the window handle
+        RawWindowHandle::Win32(handle) => unsafe { HWND::from_ptr(handle.hwnd.get() as _) },
+        _ => unimplemented!("Unsupported platform"),
+    };
+    let hdc_screen = hwnd.GetDC()?;
+    let hdc_mem = hdc_screen.CreateCompatibleDC()?;
+    let (width, height, hover, phase, center, frame_width, frame_height, frame_data) = {
+        let state = WINDOW_STATE.lock().expect("window state lock");
         let width = state.size.width as i32;
         let height = state.size.height as i32;
-
-        trace!(
-            "Drawing at position ({}, {}), size ({}, {}) frame: {}x{}",
-            state.position.x,
-            state.position.y,
+        let center = state.center();
+        let frame_width = state.frame.width() as i32;
+        let frame_height = state.frame.height() as i32;
+        let frame_data = if unsafe { state.frame.is_empty() } {
+            Vec::new()
+        } else {
+            state.frame.data(0).to_vec()
+        };
+        (
             width,
             height,
-            state.frame.width(),
-            state.frame.height()
-        );
-
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width,
-                biHeight: -height, // top-down
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-        let hbitmap = CreateDIBSection(
-            Some(hdc_mem),
-            &raw const bmi,
-            DIB_RGB_COLORS,
-            &raw mut bits_ptr,
-            Some(HANDLE::default()),
-            0,
+            state.hover,
+            state.phase,
+            center,
+            frame_width,
+            frame_height,
+            frame_data,
         )
-        .unwrap_or_default();
-        let old_bmp = SelectObject(hdc_mem, hbitmap.into());
+    };
+    trace!(
+        "Drawing at position ({}, {}), size ({}, {}) frame: {}x{}",
+        0,
+        0,
+        width,
+        height,
+        frame_width,
+        frame_height
+    );
 
-        if !bits_ptr.is_null() {
-            let buffer_size = (width * height * 4) as usize;
-            // SAFETY: bits_ptr is guaranteed to be valid by CreateDIBSection
-            let dst = std::slice::from_raw_parts_mut(bits_ptr.cast::<u8>(), buffer_size);
+    let buffer_size = (width * height * 4) as usize;
+    let mut bitmap_data = vec![0u8; buffer_size];
 
-            // Fill with arbitrary image data (BGRA)
-            if state.frame.is_empty() {
-                trace!("No frame data available");
-                let red = ((state.phase % 1.0) * 255.0) as u8;
-                for y in 0..height {
-                    for x in 0..width {
-                        let i = ((y * width + x) * 4) as usize;
-                        dst[i] = (x % 255) as u8; // Blue
-                        dst[i + 1] = (y % 255) as u8; // Green
-                        dst[i + 2] = red;
-                    }
-                }
-            } else {
-                let frame_data = state.frame.data(0);
-                let frame_width = state.frame.width() as i32;
-                let frame_height = state.frame.height() as i32;
-
-                // If frame dimensions match window, direct copy
-                if frame_width == width && frame_height == height {
-                    let copy_size = buffer_size.min(frame_data.len());
-                    if copy_size > 0 {
-                        dst[..copy_size].copy_from_slice(&frame_data[..copy_size]);
-                    }
-                } else {
-                    // Frame size mismatch - fill with black and copy what we can
-                    trace!(
-                        "Frame size mismatch: {}x{} vs window {}x{}",
-                        frame_width,
-                        frame_height,
-                        width,
-                        height
-                    );
-                    dst.fill(0);
-
-                    // Copy line by line to handle size mismatch
-                    let min_height = frame_height.min(height);
-                    let min_width = frame_width.min(width);
-                    for y in 0..min_height {
-                        let src_offset = (y * frame_width * 4) as usize;
-                        let dst_offset = (y * width * 4) as usize;
-                        let line_size = (min_width * 4) as usize;
-
-                        if src_offset + line_size <= frame_data.len()
-                            && dst_offset + line_size <= dst.len()
-                        {
-                            dst[dst_offset..dst_offset + line_size]
-                                .copy_from_slice(&frame_data[src_offset..src_offset + line_size]);
-                        }
-                    }
-                }
+    // Fill the bitmap buffer with BGRA pixel data.
+    if frame_data.is_empty() {
+        trace!("No frame data available");
+        let red = ((phase % 1.0) * 255.0) as u8;
+        for y in 0..height {
+            for x in 0..width {
+                let i = ((y * width + x) * 4) as usize;
+                bitmap_data[i] = (x % 255) as u8;
+                bitmap_data[i + 1] = (y % 255) as u8;
+                bitmap_data[i + 2] = red;
             }
         }
-
-        draw_pulsing_circle(&state, hdc_mem);
-
-        // Blit to screen
-        let _ = BitBlt(
-            hdc_screen,
-            0,
-            0,
+    } else if frame_width == width && frame_height == height {
+        let copy_size = buffer_size.min(frame_data.len());
+        if copy_size > 0 {
+            bitmap_data[..copy_size].copy_from_slice(&frame_data[..copy_size]);
+        }
+    } else {
+        trace!(
+            "Frame size mismatch: {}x{} vs window {}x{}",
+            frame_width,
+            frame_height,
             width,
-            height,
-            Some(hdc_mem),
-            0,
-            0,
-            SRCCOPY,
+            height
         );
 
-        // Clean up
-        SelectObject(hdc_mem, old_bmp);
-        let _ = DeleteObject(hbitmap.into());
-        let _ = DeleteDC(hdc_mem);
-        ReleaseDC(Some(hwnd), hdc_screen);
-    }
-}
+        let min_height = frame_height.min(height);
+        let min_width = frame_width.min(width);
+        for y in 0..min_height {
+            let src_offset = (y * frame_width * 4) as usize;
+            let dst_offset = (y * width * 4) as usize;
+            let line_size = (min_width * 4) as usize;
 
-static mut OLD_WNDPROC: Option<WNDPROC> = None;
+            if src_offset + line_size <= frame_data.len()
+                && dst_offset + line_size <= bitmap_data.len()
+            {
+                bitmap_data[dst_offset..dst_offset + line_size]
+                    .copy_from_slice(&frame_data[src_offset..src_offset + line_size]);
+            }
+        }
+    }
+
+    let hbitmap = hdc_screen.CreateCompatibleBitmap(width, height)?;
+    let mut bmi = BITMAPINFO::default();
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = co::BI::RGB;
+    hdc_mem.SetDIBits(
+        &hbitmap,
+        0,
+        height as u32,
+        &bitmap_data,
+        &bmi,
+        co::DIB::RGB_COLORS,
+    )?;
+    let _bmp_guard = hdc_mem.SelectObject(&*hbitmap)?;
+
+    draw_pulsing_circle(hover, phase, center, &hdc_mem)?;
+
+    // Blit to screen
+    hdc_screen.BitBlt(
+        POINT::new(),
+        SIZE::new(),
+        &hdc_mem,
+        POINT::new(),
+        co::ROP::SRCCOPY,
+    )?;
+    Ok(())
+}
 
 unsafe extern "system" fn custom_wndproc(
     hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    if msg == WM_NCHITTEST {
+    msg: co::WM,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    if msg == co::WM::NCHITTEST {
         // Get the cursor position from lparam (screen coordinates)
-        let screen_x = i32::from((lparam.0 & 0xFFFF) as i16);
-        let screen_y = i32::from(((lparam.0 >> 16) & 0xFFFF) as i16);
+        let screen_x = i32::from((lparam & 0xFFFF) as i16);
+        let screen_y = i32::from(((lparam >> 16) & 0xFFFF) as i16);
 
         // Get window position to convert to window coordinates
-        let mut rect = RECT::default();
-        if GetWindowRect(hwnd, &raw mut rect).is_ok() {
+        if let Ok(rect) = hwnd.GetWindowRect() {
             let window_x = screen_x - rect.left;
             let window_y = screen_y - rect.top;
 
@@ -381,106 +360,114 @@ unsafe extern "system" fn custom_wndproc(
             let cursor_pos = PhysicalPosition::new(f64::from(window_x), f64::from(window_y));
 
             if App::cursor_in_circle(&state, cursor_pos) {
-                return LRESULT(HTTRANSPARENT as isize); // Circle is click-through
+                return co::HT::TRANSPARENT.raw() as isize; // Circle is click-through
             }
-            return LRESULT(HTCAPTION as isize); // Background is draggable
+            return co::HT::CAPTION.raw() as isize; // Background is draggable
         }
     }
 
     // Intercept maximize command and double-click to go fullscreen instead
-    if msg == WM_SYSCOMMAND && (wparam.0 & 0xFFF0) == SC_MAXIMIZE as usize {
-        unsafe { toggle_fullscreen(hwnd) };
-        return LRESULT(0);
+    if msg == co::WM::SYSCOMMAND && (wparam & 0xFFF0) == co::SC::MAXIMIZE.raw() as usize {
+        let _ = toggle_fullscreen(&hwnd);
+        return 0;
     }
 
-    if msg == WM_NCLBUTTONDBLCLK {
-        unsafe { toggle_fullscreen(hwnd) };
-        return LRESULT(0);
+    if msg == co::WM::NCLBUTTONDBLCLK {
+        let _ = toggle_fullscreen(&hwnd);
+        return 0;
     }
 
     // Call the original window procedure
-    if let Some(old_proc) = OLD_WNDPROC {
-        CallWindowProcW(old_proc, hwnd, msg, wparam, lparam)
+    let old_proc = {
+        let state = WINDOW_STATE.lock().unwrap();
+        state.old_proc
+    };
+    if let Some(old_proc) = old_proc {
+        old_proc(hwnd, msg, wparam, lparam)
     } else {
-        LRESULT(0)
+        0
     }
 }
 
-static mut IS_FULLSCREEN: bool = false;
-static mut SAVED_POSITION: (i32, i32) = (0, 0);
-static mut SAVED_SIZE: (i32, i32) = (0, 0);
+fn toggle_fullscreen(hwnd: &HWND) -> Result<()> {
+    let (is_fullscreen, old_position, old_size) = {
+        let state = WINDOW_STATE.lock().unwrap();
+        (state.is_fullscreen, state.old_position, state.old_size)
+    };
 
-unsafe fn toggle_fullscreen(hwnd: HWND) {
-    use windows::Win32::Foundation::RECT;
-
-    if IS_FULLSCREEN {
+    if is_fullscreen {
         // Restore to normal size
-        let _ = SetWindowPos(
-            hwnd,
-            Some(HWND_TOP),
-            SAVED_POSITION.0,
-            SAVED_POSITION.1,
-            SAVED_SIZE.0,
-            SAVED_SIZE.1,
-            SWP_FRAMECHANGED | SWP_NOACTIVATE,
-        );
-        IS_FULLSCREEN = false;
+        hwnd.SetWindowPos(
+            HwndPlace::None,
+            POINT::with(old_position.x, old_position.y),
+            SIZE::with(old_size.width as i32, old_size.height as i32),
+            co::SWP::FRAMECHANGED | co::SWP::NOACTIVATE,
+        )?;
 
-        // Update state
         let mut state = WINDOW_STATE.lock().unwrap();
-        state.position = PhysicalPosition::new(SAVED_POSITION.0, SAVED_POSITION.1);
-        state.size = PhysicalSize::new(SAVED_SIZE.0 as u32, SAVED_SIZE.1 as u32);
+        state.position = old_position;
+        state.size = old_size;
+        state.is_fullscreen = false;
         state.rescale_needed = true;
     } else {
         // Save current position and size
-        let mut rect = RECT::default();
-        if GetWindowRect(hwnd, &raw mut rect).is_ok() {
-            SAVED_POSITION = (rect.left, rect.top);
-            SAVED_SIZE = (rect.right - rect.left, rect.bottom - rect.top);
-        }
+        let rect = hwnd.GetWindowRect()?;
+        let old_position = PhysicalPosition {
+            x: rect.left,
+            y: rect.top,
+        };
+        let old_size = PhysicalSize {
+            width: (rect.right - rect.left) as u32,
+            height: (rect.bottom - rect.top) as u32,
+        };
 
         // Get full screen dimensions (including taskbar)
-        let screen_width = GetSystemMetrics(SM_CXSCREEN);
-        let screen_height = GetSystemMetrics(SM_CYSCREEN);
+        let screen_width = GetSystemMetrics(co::SM::CXSCREEN);
+        let screen_height = GetSystemMetrics(co::SM::CYSCREEN);
 
         // Set to fullscreen
-        let _ = SetWindowPos(
-            hwnd,
-            Some(HWND_TOP),
-            0,
-            0,
-            screen_width,
-            screen_height,
-            SWP_FRAMECHANGED | SWP_NOACTIVATE,
-        );
-        IS_FULLSCREEN = true;
+        hwnd.SetWindowPos(
+            HwndPlace::None,
+            POINT::new(),
+            SIZE::new(),
+            co::SWP::FRAMECHANGED | co::SWP::NOACTIVATE,
+        )?;
 
-        // Update state
         let mut state = WINDOW_STATE.lock().unwrap();
+        state.old_position = old_position;
+        state.old_size = old_size;
         state.position = PhysicalPosition::new(0, 0);
         state.size = PhysicalSize::new(screen_width as u32, screen_height as u32);
+        state.is_fullscreen = true;
         state.rescale_needed = true;
     }
+    Ok(())
 }
 
 fn setup_click_through(window: &Window) {
+    let hwnd = match window
+        .window_handle()
+        .expect("tried to access window handle on another thread")
+        .as_raw()
+    {
+        // Safety: We are accessing a valid HWND pointer from the window handle
+        RawWindowHandle::Win32(handle) => unsafe { HWND::from_ptr(handle.hwnd.get() as _) },
+        _ => unimplemented!("Unsupported platform"),
+    };
+    let mut state = WINDOW_STATE.lock().unwrap();
+
+    // Store the original window procedure
+    let old_proc = hwnd.GetWindowLongPtr(co::GWLP::WNDPROC);
+    let old_proc = unsafe { std::mem::transmute::<isize, WNDPROC>(old_proc) };
+    state.old_proc = Some(old_proc);
+
+    // Set our custom window procedure
     unsafe {
-        let hwnd = match window.window_handle().unwrap().as_raw() {
-            RawWindowHandle::Win32(handle) => HWND(handle.hwnd.get() as _),
-            _ => return,
-        };
-
-        // Store the original window procedure
-        let old_proc = GetWindowLongPtrW(hwnd, GWL_WNDPROC);
-        OLD_WNDPROC = Some(std::mem::transmute::<isize, WNDPROC>(old_proc));
-
-        // Set our custom window procedure
-        SetWindowLongPtrW(
-            hwnd,
-            GWL_WNDPROC,
+        hwnd.SetWindowLongPtr(
+            co::GWLP::WNDPROC,
             custom_wndproc as *const () as usize as isize,
-        );
+        )
+    };
 
-        debug!("Click-through enabled");
-    }
+    debug!("Click-through enabled");
 }
