@@ -204,6 +204,23 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn draw_gradient(bitmap_buffer: &mut [u8], size: PhysicalSize<u32>, phase: f32) {
+    let red = ((phase % 1.0) * 255.0) as u8;
+    for y in 0..size.height {
+        for x in 0..size.width {
+            let i = ((y * size.width + x) * 4) as usize;
+            bitmap_buffer[i] = (x % 255) as u8;
+            bitmap_buffer[i + 1] = (y % 255) as u8;
+            bitmap_buffer[i + 2] = red;
+            bitmap_buffer[i + 3] = TRANSPARENCY;
+        }
+    }
+    trace!(
+        "No frame data available, drawing {} gradient",
+        bitmap_buffer.len()
+    );
+}
+
 fn draw_pulsing_circle(
     hover: bool,
     phase: f32,
@@ -238,83 +255,49 @@ fn draw_gdi(window: &Window, bitmap_buffer: &mut Vec<u8>) -> Result<()> {
     };
     let hdc_screen = hwnd.GetDC()?;
     let hdc_mem = hdc_screen.CreateCompatibleDC()?;
-    let (position, width, height, hover, phase, center, frame_width, frame_height, frame_data) = {
-        let state = WINDOW_STATE.lock().expect("window state lock");
-        let position = state.position;
-        let width = state.size.width as i32;
-        let height = state.size.height as i32;
-        let center = state.center();
-        let frame_width = state.frame.width() as i32;
-        let frame_height = state.frame.height() as i32;
-        let frame_data = if unsafe { state.frame.is_empty() } {
-            Vec::new()
-        } else {
-            state.frame.data(0).to_vec()
-        };
-        (
-            position,
-            width,
-            height,
-            state.hover,
-            state.phase,
-            center,
-            frame_width,
-            frame_height,
-            frame_data,
-        )
-    };
+    let state = WINDOW_STATE.lock().expect("window state lock");
     trace!(
         "Drawing at position ({}, {}), size ({}, {}) frame: {}x{}",
-        position.x,
-        position.y,
-        width,
-        height,
-        frame_width,
-        frame_height
+        state.position.x,
+        state.position.y,
+        state.size.width,
+        state.size.height,
+        state.frame.width(),
+        state.frame.height()
     );
 
-    let buffer_size = (width * height * 4) as usize;
+    let buffer_size = (state.size.width * state.size.height * 4) as usize;
     bitmap_buffer.resize(buffer_size, 0);
 
     // Fill the bitmap buffer with BGRA pixel data.
-    if frame_data.is_empty() {
-        let red = ((phase % 1.0) * 255.0) as u8;
-        for y in 0..height {
-            for x in 0..width {
-                let i = ((y * width + x) * 4) as usize;
-                bitmap_buffer[i] = (x % 255) as u8;
-                bitmap_buffer[i + 1] = (y % 255) as u8;
-                bitmap_buffer[i + 2] = red;
-                bitmap_buffer[i + 3] = TRANSPARENCY;
-            }
-        }
-        trace!("No frame data available, drawing {} gradient", bitmap_buffer.len());
-    } else if frame_width == width && frame_height == height {
-        let copy_size = buffer_size.min(frame_data.len());
+    if unsafe { state.frame.is_empty() } {
+        draw_gradient(bitmap_buffer, state.size, state.phase);
+    } else if state.frame.width() == state.size.width && state.frame.height() == state.size.height {
+        let copy_size = buffer_size.min(state.frame.data(0).len());
         if copy_size > 0 {
-            bitmap_buffer[..copy_size].copy_from_slice(&frame_data[..copy_size]);
+            bitmap_buffer[..copy_size].copy_from_slice(&state.frame.data(0)[..copy_size]);
         }
     } else {
         trace!(
             "Frame size mismatch: {}x{} vs window {}x{}",
-            frame_width,
-            frame_height,
-            width,
-            height
+            state.frame.width(),
+            state.frame.height(),
+            state.size.width,
+            state.size.height
         );
 
-        let min_height = frame_height.min(height);
-        let min_width = frame_width.min(width);
+        let min_height = state.frame.height().min(state.size.height);
+        let min_width = state.frame.width().min(state.size.width);
         for y in 0..min_height {
-            let src_offset = (y * frame_width * 4) as usize;
-            let dst_offset = (y * width * 4) as usize;
+            let src_offset = (y * state.frame.width() * 4) as usize;
+            let dst_offset = (y * state.size.width * 4) as usize;
             let line_size = (min_width * 4) as usize;
 
-            if src_offset + line_size <= frame_data.len()
+            if src_offset + line_size <= state.frame.data(0).len()
                 && dst_offset + line_size <= bitmap_buffer.len()
             {
                 bitmap_buffer[dst_offset..dst_offset + line_size]
-                    .copy_from_slice(&frame_data[src_offset..src_offset + line_size]);
+                    .copy_from_slice(&state.frame.data(0)[src_offset..src_offset + line_size]);
             }
         }
     }
@@ -323,10 +306,12 @@ fn draw_gdi(window: &Window, bitmap_buffer: &mut Vec<u8>) -> Result<()> {
         pixel[3] = TRANSPARENCY;
     }
 
+    let width = state.size.width as i32;
+    let height = state.size.height as i32;
     let bitmap = hdc_screen.CreateCompatibleBitmap(width, height)?;
     let mut bmi = BITMAPINFO::default();
     bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height;
+    bmi.bmiHeader.biHeight = -height; // Negative for top-down bitmap
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = co::BI::RGB;
@@ -334,13 +319,13 @@ fn draw_gdi(window: &Window, bitmap_buffer: &mut Vec<u8>) -> Result<()> {
         &bitmap,
         0,
         height as u32,
-        &bitmap_buffer,
+        bitmap_buffer,
         &bmi,
         co::DIB::RGB_COLORS,
     )?;
     let _bmp_guard = hdc_mem.SelectObject(&*bitmap)?;
 
-    draw_pulsing_circle(hover, phase, center, &hdc_mem)?;
+    draw_pulsing_circle(state.hover, state.phase, state.center(), &hdc_mem)?;
 
     // Blit to screen
     hdc_screen.BitBlt(
@@ -353,12 +338,7 @@ fn draw_gdi(window: &Window, bitmap_buffer: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
-unsafe extern "system" fn custom_wndproc(
-    hwnd: HWND,
-    msg: co::WM,
-    wparam: usize,
-    lparam: isize,
-) -> isize {
+fn custom_wndproc(hwnd: HWND, msg: co::WM, wparam: usize, lparam: isize) -> isize {
     if msg == co::WM::NCHITTEST {
         // Get the cursor position from lparam (screen coordinates)
         let screen_x = i32::from((lparam & 0xFFFF) as i16);
@@ -381,12 +361,9 @@ unsafe extern "system" fn custom_wndproc(
     }
 
     // Intercept maximize command and double-click to go fullscreen instead
-    if msg == co::WM::SYSCOMMAND && (wparam & 0xFFF0) == co::SC::MAXIMIZE.raw() as usize {
-        let _ = toggle_fullscreen(&hwnd);
-        return 0;
-    }
-
-    if msg == co::WM::NCLBUTTONDBLCLK {
+    if msg == co::WM::NCLBUTTONDBLCLK
+        || (msg == co::WM::SYSCOMMAND && (wparam & 0xFFF0) == co::SC::MAXIMIZE.raw() as usize)
+    {
         let _ = toggle_fullscreen(&hwnd);
         return 0;
     }
@@ -404,57 +381,42 @@ unsafe extern "system" fn custom_wndproc(
 }
 
 fn toggle_fullscreen(hwnd: &HWND) -> Result<()> {
-    let (is_fullscreen, old_position, old_size) = {
-        let state = WINDOW_STATE.lock().unwrap();
-        (state.is_fullscreen, state.old_position, state.old_size)
+    let (point, size) = {
+        // The mutex needs to be dropped before going across `SetWindowPos`
+        // because the Moved/Resized events will try to lock it again.
+        let mut state = WINDOW_STATE.lock().unwrap();
+        if state.is_fullscreen {
+            // Restore to old position and size
+            state.position = state.old_position;
+            state.size = state.old_size;
+            (
+                POINT::with(state.position.x, state.position.y),
+                SIZE::with(state.size.width as i32, state.size.height as i32),
+            )
+        } else {
+            // Save current position and size before going fullscreen
+            state.old_position = state.position;
+            state.old_size = state.size;
+            // Get full screen dimensions (including taskbar)
+            (
+                POINT::new(),
+                SIZE::with(
+                    GetSystemMetrics(co::SM::CXSCREEN),
+                    GetSystemMetrics(co::SM::CYSCREEN),
+                ),
+            )
+        }
     };
 
-    if is_fullscreen {
-        debug!("Restoring window from fullscreen");
-        hwnd.SetWindowPos(
-            HwndPlace::None,
-            POINT::with(old_position.x, old_position.y),
-            SIZE::with(old_size.width as i32, old_size.height as i32),
-            co::SWP::FRAMECHANGED | co::SWP::NOACTIVATE,
-        )?;
-
-        let mut state = WINDOW_STATE.lock().unwrap();
-        state.position = old_position;
-        state.size = old_size;
-        state.is_fullscreen = false;
-        state.rescale_needed = true;
-    } else {
-        let rect = hwnd.GetWindowRect()?;
-        let old_position = PhysicalPosition {
-            x: rect.left,
-            y: rect.top,
-        };
-        let old_size = PhysicalSize {
-            width: (rect.right - rect.left) as u32,
-            height: (rect.bottom - rect.top) as u32,
-        };
-        
-        // Get full screen dimensions (including taskbar)
-        let screen_width = GetSystemMetrics(co::SM::CXSCREEN);
-        let screen_height = GetSystemMetrics(co::SM::CYSCREEN);
-        
-        debug!("Setting window to fullscreen from {}x{} to {screen_width}x{screen_height}", rect.right - rect.left, rect.bottom - rect.top);
-        // Set to fullscreen
-        hwnd.SetWindowPos(
-            HwndPlace::None,
-            POINT::new(),
-            SIZE::with(screen_width, screen_height),
-            co::SWP::FRAMECHANGED | co::SWP::NOACTIVATE,
-        )?;
-
-        let mut state = WINDOW_STATE.lock().unwrap();
-        state.old_position = old_position;
-        state.old_size = old_size;
-        state.position = PhysicalPosition::new(0, 0);
-        state.size = PhysicalSize::new(screen_width as u32, screen_height as u32);
-        state.is_fullscreen = true;
-        state.rescale_needed = true;
-    }
+    debug!(
+        "Setting window position to ({}, {}), size ({}x{})",
+        point.x, point.y, size.cx, size.cy
+    );
+    let resize_flags: co::SWP = co::SWP::FRAMECHANGED | co::SWP::NOACTIVATE;
+    hwnd.SetWindowPos(HwndPlace::None, point, size, resize_flags)?;
+    let mut state = WINDOW_STATE.lock().unwrap();
+    state.is_fullscreen = !state.is_fullscreen;
+    state.rescale_needed = true;
     Ok(())
 }
 
