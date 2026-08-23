@@ -58,23 +58,20 @@ impl ApplicationHandler for App {
             return;
         }
 
-        let (title, size, position) = {
-            let state = WINDOW_STATE.lock().unwrap();
-            (state.title.clone(), state.size, state.position)
-        };
+        let state = WINDOW_STATE.lock().unwrap();
         let window = event_loop
             .create_window(
                 WindowAttributes::default()
-                    .with_title(&title)
-                    .with_inner_size(size)
-                    .with_position(position)
+                    .with_title(&state.title)
+                    .with_inner_size(state.size)
+                    .with_position(state.position)
                     .with_decorations(false)
                     .with_transparent(true)
                     .with_window_level(WindowLevel::AlwaysOnTop)
                     .with_skip_taskbar(true),
             )
             .unwrap();
-
+        drop(state); // Release the lock before calling setup_click_through
         // Set up click-through for non-circle areas
         setup_click_through(&window);
 
