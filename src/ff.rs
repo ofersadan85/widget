@@ -97,12 +97,8 @@ impl FrameStream {
                         )?;
                     }
 
-                    // Always create a fresh output frame for scaling
-                    let mut rgb_frame = frame::Video::empty();
-                    self.scaler.run(&frame, &mut rgb_frame)?;
-
                     let mut state = FRAME_SYNC.wait(WINDOW_STATE.lock().unwrap()).unwrap();
-                    state.frame = rgb_frame;
+                    self.scaler.run(&frame, &mut state.frame)?;
                     trace!("Frame\t{i}");
                     i += 1;
                 }
