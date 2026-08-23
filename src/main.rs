@@ -214,7 +214,8 @@ unsafe fn draw_pulsing_circle(state: &WindowState, hdc_mem: HDC) {
     let radius = (60.0 + (state.phase.sin() * 30.0)) as i32;
     let center = state.center();
 
-    let _ = hdc_mem.Ellipse(
+    let _ = Ellipse(
+        hdc_mem,
         center.x as i32 - radius,
         center.y as i32 - radius,
         center.x as i32 + radius,
@@ -250,14 +251,14 @@ fn draw_gdi(window: &Window) {
             state.frame.height()
         );
 
-        let bmi = w::BITMAPINFO {
-            bmiHeader: w::BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<w::BITMAPINFOHEADER>() as u32,
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
                 biWidth: width,
                 biHeight: -height, // top-down
                 biPlanes: 1,
                 biBitCount: 32,
-                biCompression: co::BI::RGB.raw(),
+                biCompression: BI_RGB.0,
                 ..Default::default()
             },
             ..Default::default()
@@ -278,7 +279,7 @@ fn draw_gdi(window: &Window) {
         if !bits_ptr.is_null() {
             let buffer_size = (width * height * 4) as usize;
             // SAFETY: bits_ptr is guaranteed to be valid by CreateDIBSection
-            let dst = unsafe { std::slice::from_raw_parts_mut(bits_ptr.cast::<u8>(), buffer_size) };
+            let dst = std::slice::from_raw_parts_mut(bits_ptr.cast::<u8>(), buffer_size);
 
             // Fill with arbitrary image data (BGRA)
             if state.frame.is_empty() {
@@ -333,7 +334,7 @@ fn draw_gdi(window: &Window) {
             }
         }
 
-        draw_pulsing_circle(&state, &hdc_mem);
+        draw_pulsing_circle(&state, hdc_mem);
 
         // Blit to screen
         let _ = BitBlt(
@@ -387,14 +388,14 @@ unsafe extern "system" fn custom_wndproc(
     }
 
     // Intercept maximize command and double-click to go fullscreen instead
-    if msg == co::WM::SYSCOMMAND && (wparam & 0xFFF0) == co::SC::MAXIMIZE.raw() as usize {
+    if msg == WM_SYSCOMMAND && (wparam.0 & 0xFFF0) == SC_MAXIMIZE as usize {
         unsafe { toggle_fullscreen(hwnd) };
-        return 0;
+        return LRESULT(0);
     }
 
-    if msg == co::WM::NCLBUTTONDBLCLK {
+    if msg == WM_NCLBUTTONDBLCLK {
         unsafe { toggle_fullscreen(hwnd) };
-        return 0;
+        return LRESULT(0);
     }
 
     // Call the original window procedure
@@ -432,14 +433,15 @@ unsafe fn toggle_fullscreen(hwnd: HWND) {
         state.rescale_needed = true;
     } else {
         // Save current position and size
-        if let Ok(rect) = hwnd.GetWindowRect() {
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &raw mut rect).is_ok() {
             SAVED_POSITION = (rect.left, rect.top);
             SAVED_SIZE = (rect.right - rect.left, rect.bottom - rect.top);
         }
 
         // Get full screen dimensions (including taskbar)
-        let screen_width = w::GetSystemMetrics(co::SM::CXSCREEN);
-        let screen_height = w::GetSystemMetrics(co::SM::CYSCREEN);
+        let screen_width = GetSystemMetrics(SM_CXSCREEN);
+        let screen_height = GetSystemMetrics(SM_CYSCREEN);
 
         // Set to fullscreen
         let _ = SetWindowPos(
