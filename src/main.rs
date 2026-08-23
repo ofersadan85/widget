@@ -11,8 +11,8 @@ use winit::{
     window::{Window, WindowAttributes, WindowId, WindowLevel},
 };
 use winsafe::{
-    co, guard::DeleteDCGuard, GetSystemMetrics, HwndPlace, SysResult, BITMAPINFO, HBRUSH, HPEN,
-    HWND, POINT, RECT, SIZE, WNDPROC,
+    BITMAPINFO, GetSystemMetrics, HBRUSH, HPEN, HWND, HwndPlace, POINT, RECT, SIZE, SysResult,
+    WNDPROC, co, guard::DeleteDCGuard,
 };
 
 mod error;
@@ -20,7 +20,7 @@ use error::Result;
 mod ff;
 use ff::FrameStream;
 mod state;
-use state::{WindowState, FRAME_SYNC, WINDOW_STATE};
+use state::{FRAME_SYNC, WINDOW_STATE, WindowState};
 mod colors;
 use colors::{BLACK, BLUE, GREEN};
 
@@ -89,16 +89,14 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                if let Some(window) = &self.window {
-                    if let Err(err) = draw_gdi(window, &mut self.bitmap_buffer) {
-                        error!("draw_gdi failed: {err}");
-                    }
+                if let Some(window) = &self.window
+                    && let Err(err) = draw_gdi(window, &mut self.bitmap_buffer)
+                {
+                    error!("draw_gdi failed: {err}");
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let mut state = WINDOW_STATE.lock().unwrap();
-                state.cursor = position;
-
                 // position is window-relative, so we can use it directly for hover detection
                 state.hover = Self::cursor_in_circle(&state, position);
             }
@@ -159,7 +157,7 @@ impl ApplicationHandler for App {
                 state.size = size;
                 state.rescale_needed = true;
             }
-            _ => {}
+            event => trace!("Unhandled window event: {event:?}"),
         }
     }
 
