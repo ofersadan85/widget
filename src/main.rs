@@ -54,13 +54,16 @@ impl ApplicationHandler for App {
             return;
         }
 
-        let state = WINDOW_STATE.lock().unwrap();
+        let (title, size, position) = {
+            let state = WINDOW_STATE.lock().unwrap();
+            (state.title.clone(), state.size, state.position)
+        };
         let window = event_loop
             .create_window(
                 WindowAttributes::default()
-                    .with_title(&state.title)
-                    .with_inner_size(state.size)
-                    .with_position(state.position)
+                    .with_title(&title)
+                    .with_inner_size(size)
+                    .with_position(position)
                     .with_decorations(false)
                     .with_transparent(true)
                     .with_window_level(WindowLevel::AlwaysOnTop)
@@ -309,7 +312,7 @@ fn draw_gdi(window: &Window) -> Result<()> {
         }
     }
 
-    let hbitmap = hdc_screen.CreateCompatibleBitmap(width, height)?;
+    let bitmap = hdc_screen.CreateCompatibleBitmap(width, height)?;
     let mut bmi = BITMAPINFO::default();
     bmi.bmiHeader.biWidth = width;
     bmi.bmiHeader.biHeight = -height;
@@ -317,14 +320,14 @@ fn draw_gdi(window: &Window) -> Result<()> {
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = co::BI::RGB;
     hdc_mem.SetDIBits(
-        &hbitmap,
+        &bitmap,
         0,
         height as u32,
         &bitmap_data,
         &bmi,
         co::DIB::RGB_COLORS,
     )?;
-    let _bmp_guard = hdc_mem.SelectObject(&*hbitmap)?;
+    let _bmp_guard = hdc_mem.SelectObject(&*bitmap)?;
 
     draw_pulsing_circle(hover, phase, center, &hdc_mem)?;
 
