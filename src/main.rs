@@ -24,6 +24,8 @@ use state::{WindowState, FRAME_SYNC, WINDOW_STATE};
 mod colors;
 use colors::{BLACK, BLUE, GREEN};
 
+const TRANSPARENCY: u8 = 100;
+
 struct App {
     window: Option<Window>,
     last_frame_time: Instant,
@@ -283,6 +285,7 @@ fn draw_gdi(window: &Window, bitmap_buffer: &mut Vec<u8>) -> Result<()> {
                 bitmap_buffer[i] = (x % 255) as u8;
                 bitmap_buffer[i + 1] = (y % 255) as u8;
                 bitmap_buffer[i + 2] = red;
+                bitmap_buffer[i + 3] = TRANSPARENCY;
             }
         }
         trace!("No frame data available, drawing {} gradient", bitmap_buffer.len());
@@ -316,6 +319,10 @@ fn draw_gdi(window: &Window, bitmap_buffer: &mut Vec<u8>) -> Result<()> {
         }
     }
 
+    for pixel in bitmap_buffer.chunks_mut(4) {
+        pixel[3] = TRANSPARENCY;
+    }
+
     let bitmap = hdc_screen.CreateCompatibleBitmap(width, height)?;
     let mut bmi = BITMAPINFO::default();
     bmi.bmiHeader.biWidth = width;
@@ -338,7 +345,7 @@ fn draw_gdi(window: &Window, bitmap_buffer: &mut Vec<u8>) -> Result<()> {
     // Blit to screen
     hdc_screen.BitBlt(
         POINT::new(),
-        SIZE::new(),
+        SIZE::with(width, height),
         &hdc_mem,
         POINT::new(),
         co::ROP::SRCCOPY,
@@ -403,7 +410,7 @@ fn toggle_fullscreen(hwnd: &HWND) -> Result<()> {
     };
 
     if is_fullscreen {
-        // Restore to normal size
+        debug!("Restoring window from fullscreen");
         hwnd.SetWindowPos(
             HwndPlace::None,
             POINT::with(old_position.x, old_position.y),
@@ -417,7 +424,6 @@ fn toggle_fullscreen(hwnd: &HWND) -> Result<()> {
         state.is_fullscreen = false;
         state.rescale_needed = true;
     } else {
-        // Save current position and size
         let rect = hwnd.GetWindowRect()?;
         let old_position = PhysicalPosition {
             x: rect.left,
@@ -427,11 +433,12 @@ fn toggle_fullscreen(hwnd: &HWND) -> Result<()> {
             width: (rect.right - rect.left) as u32,
             height: (rect.bottom - rect.top) as u32,
         };
-
+        
         // Get full screen dimensions (including taskbar)
         let screen_width = GetSystemMetrics(co::SM::CXSCREEN);
         let screen_height = GetSystemMetrics(co::SM::CYSCREEN);
-
+        
+        debug!("Setting window to fullscreen from {}x{} to {screen_width}x{screen_height}", rect.right - rect.left, rect.bottom - rect.top);
         // Set to fullscreen
         hwnd.SetWindowPos(
             HwndPlace::None,
