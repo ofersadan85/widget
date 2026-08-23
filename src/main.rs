@@ -124,9 +124,7 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 if let Some(window) = &self.window {
-                    let mut state = WINDOW_STATE.lock().unwrap();
                     let mut movement = PhysicalPosition::new(0, 0);
-
                     match key {
                         KeyCode::Escape => {
                             debug!("Escape pressed");
@@ -140,12 +138,15 @@ impl ApplicationHandler for App {
                     }
 
                     if movement.x != 0 || movement.y != 0 {
-                        let new_pos = PhysicalPosition::new(
-                            state.position.x + movement.x,
-                            state.position.y + movement.y,
-                        );
+                        let new_pos = {
+                            let mut state = WINDOW_STATE.lock().unwrap();
+                            state.position = PhysicalPosition::new(
+                                state.position.x + movement.x,
+                                state.position.y + movement.y,
+                            );
+                            state.position
+                        }; // Release the lock before calling set_outer_position
                         window.set_outer_position(new_pos);
-                        state.position = new_pos;
                     }
                 }
             }
