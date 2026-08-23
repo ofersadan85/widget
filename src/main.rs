@@ -443,7 +443,7 @@ fn toggle_fullscreen(hwnd: &HWND) -> Result<()> {
         hwnd.SetWindowPos(
             HwndPlace::None,
             POINT::new(),
-            SIZE::new(),
+            SIZE::with(screen_width, screen_height),
             co::SWP::FRAMECHANGED | co::SWP::NOACTIVATE,
         )?;
 
