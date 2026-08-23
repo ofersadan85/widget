@@ -1,20 +1,6 @@
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, trace};
-use windows::Win32::{
-    Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM},
-    Graphics::Gdi::{
-        BitBlt, CreateCompatibleDC, CreateDIBSection, CreatePen, CreateSolidBrush, DeleteDC,
-        DeleteObject, Ellipse, GetDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
-        BI_RGB, DIB_RGB_COLORS, HDC, PS_SOLID, SRCCOPY,
-    },
-    UI::WindowsAndMessaging::{
-        CallWindowProcW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW,
-        SetWindowPos, GWL_WNDPROC, HTCAPTION, HTTRANSPARENT, HWND_TOP, SC_MAXIMIZE, SM_CXSCREEN,
-        SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
-        WM_SYSCOMMAND, WNDPROC,
-    },
-};
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
@@ -201,11 +187,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-unsafe fn draw_pulsing_circle(state: &WindowState, hdc_mem: HDC) {
+fn draw_pulsing_circle(state: &WindowState, hdc_mem: &w::HDC) {
     let pen_color = if state.hover {
-        COLORREF(0x0000_FF00) // Green when hovered
+        co::COLORREF::new(0, 255, 0) // Green when hovered
     } else {
-        COLORREF(0x0000_00FF) // Blue otherwise
+        co::COLORREF::new(255, 0, 0) // Red otherwise (note: BGR order)
     };
     let hpen = CreatePen(PS_SOLID, 3, pen_color);
     let old_pen = SelectObject(hdc_mem, hpen.into());
@@ -213,8 +199,8 @@ unsafe fn draw_pulsing_circle(state: &WindowState, hdc_mem: HDC) {
     let old_brush = SelectObject(hdc_mem, brush.into());
     let radius = (60.0 + (state.phase.sin() * 30.0)) as i32;
     let center = state.center();
-    let _ = Ellipse(
-        hdc_mem,
+
+    let _ = hdc_mem.Ellipse(
         center.x as i32 - radius,
         center.y as i32 - radius,
         center.x as i32 + radius,
@@ -250,14 +236,14 @@ fn draw_gdi(window: &Window) {
             state.frame.height()
         );
 
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+        let bmi = w::BITMAPINFO {
+            bmiHeader: w::BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<w::BITMAPINFOHEADER>() as u32,
                 biWidth: width,
                 biHeight: -height, // top-down
                 biPlanes: 1,
                 biBitCount: 32,
-                biCompression: BI_RGB.0,
+                biCompression: co::BI::RGB.raw(),
                 ..Default::default()
             },
             ..Default::default()
@@ -277,7 +263,8 @@ fn draw_gdi(window: &Window) {
 
         if !bits_ptr.is_null() {
             let buffer_size = (width * height * 4) as usize;
-            let dst = std::slice::from_raw_parts_mut(bits_ptr.cast::<u8>(), buffer_size);
+            // SAFETY: bits_ptr is guaranteed to be valid by CreateDIBSection
+            let dst = unsafe { std::slice::from_raw_parts_mut(bits_ptr.cast::<u8>(), buffer_size) };
 
             // Fill with arbitrary image data (BGRA)
             if state.frame.is_empty() {
@@ -332,7 +319,7 @@ fn draw_gdi(window: &Window) {
             }
         }
 
-        draw_pulsing_circle(&state, hdc_mem);
+        draw_pulsing_circle(&state, &hdc_mem);
 
         // Blit to screen
         let _ = BitBlt(
@@ -355,22 +342,21 @@ fn draw_gdi(window: &Window) {
     }
 }
 
-static mut OLD_WNDPROC: Option<WNDPROC> = None;
+static mut OLD_WNDPROC: Option<isize> = None;
 
-unsafe extern "system" fn custom_wndproc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    if msg == WM_NCHITTEST {
+extern "system" fn custom_wndproc(
+    hwnd: w::HWND,
+    msg: co::WM,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    if msg == co::WM::NCHITTEST {
         // Get the cursor position from lparam (screen coordinates)
-        let screen_x = i32::from((lparam.0 & 0xFFFF) as i16);
-        let screen_y = i32::from(((lparam.0 >> 16) & 0xFFFF) as i16);
+        let screen_x = i32::from((lparam & 0xFFFF) as i16);
+        let screen_y = i32::from(((lparam >> 16) & 0xFFFF) as i16);
 
         // Get window position to convert to window coordinates
-        let mut rect = RECT::default();
-        if GetWindowRect(hwnd, &raw mut rect).is_ok() {
+        if let Ok(rect) = hwnd.GetWindowRect() {
             let window_x = screen_x - rect.left;
             let window_y = screen_y - rect.top;
 
@@ -379,28 +365,30 @@ unsafe extern "system" fn custom_wndproc(
             let cursor_pos = PhysicalPosition::new(f64::from(window_x), f64::from(window_y));
 
             if App::cursor_in_circle(&state, cursor_pos) {
-                return LRESULT(HTTRANSPARENT as isize); // Circle is click-through
+                return co::HT::TRANSPARENT.raw() as isize; // Circle is click-through
             }
-            return LRESULT(HTCAPTION as isize); // Background is draggable
+            return co::HT::CAPTION.raw() as isize; // Background is draggable
         }
     }
 
     // Intercept maximize command and double-click to go fullscreen instead
-    if msg == WM_SYSCOMMAND && (wparam.0 & 0xFFF0) == SC_MAXIMIZE as usize {
-        toggle_fullscreen(hwnd);
-        return LRESULT(0);
+    if msg == co::WM::SYSCOMMAND && (wparam & 0xFFF0) == co::SC::MAXIMIZE.raw() as usize {
+        unsafe { toggle_fullscreen(hwnd) };
+        return 0;
     }
 
-    if msg == WM_NCLBUTTONDBLCLK {
-        toggle_fullscreen(hwnd);
-        return LRESULT(0);
+    if msg == co::WM::NCLBUTTONDBLCLK {
+        unsafe { toggle_fullscreen(hwnd) };
+        return 0;
     }
 
     // Call the original window procedure
-    if let Some(old_proc) = OLD_WNDPROC {
-        CallWindowProcW(old_proc, hwnd, msg, wparam, lparam)
-    } else {
-        LRESULT(0)
+    unsafe {
+        if let Some(old_proc) = OLD_WNDPROC {
+            w::CallWindowProc(old_proc, hwnd, msg.raw(), wparam, lparam)
+        } else {
+            0
+        }
     }
 }
 
@@ -431,15 +419,14 @@ unsafe fn toggle_fullscreen(hwnd: HWND) {
         state.rescale_needed = true;
     } else {
         // Save current position and size
-        let mut rect = RECT::default();
-        if GetWindowRect(hwnd, &raw mut rect).is_ok() {
+        if let Ok(rect) = hwnd.GetWindowRect() {
             SAVED_POSITION = (rect.left, rect.top);
             SAVED_SIZE = (rect.right - rect.left, rect.bottom - rect.top);
         }
 
         // Get full screen dimensions (including taskbar)
-        let screen_width = GetSystemMetrics(SM_CXSCREEN);
-        let screen_height = GetSystemMetrics(SM_CYSCREEN);
+        let screen_width = w::GetSystemMetrics(co::SM::CXSCREEN);
+        let screen_height = w::GetSystemMetrics(co::SM::CYSCREEN);
 
         // Set to fullscreen
         let _ = SetWindowPos(
@@ -462,12 +449,15 @@ unsafe fn toggle_fullscreen(hwnd: HWND) {
 }
 
 fn setup_click_through(window: &Window) {
-    unsafe {
-        let hwnd = match window.window_handle().unwrap().as_raw() {
-            RawWindowHandle::Win32(handle) => HWND(handle.hwnd.get() as _),
-            _ => return,
-        };
+    let hwnd = match window.window_handle().unwrap().as_raw() {
+        RawWindowHandle::Win32(handle) => w::HWND::from_ptr(handle.hwnd.get() as _),
+        _ => {
+            error!("Unsupported platform for click-through");
+            return;
+        }
+    };
 
+    unsafe {
         // Store the original window procedure
         let old_proc = GetWindowLongPtrW(hwnd, GWL_WNDPROC);
         OLD_WNDPROC = Some(std::mem::transmute::<isize, WNDPROC>(old_proc));
