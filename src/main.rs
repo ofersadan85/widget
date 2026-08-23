@@ -178,18 +178,19 @@ impl ApplicationHandler for App {
 }
 
 fn main() -> Result<()> {
-    let filename = std::env::args().nth(1).unwrap_or_default();
     tracing_subscriber::fmt::init();
     ffmpeg_next::init()?;
 
-    std::thread::spawn(move || {
-        if let Err(e) = FrameStream::new(&filename).and_then(|mut s| {
-            WINDOW_STATE.lock().unwrap().fps = s.fps;
-            s.read_frames()
-        }) {
-            error!("Error in FFmpeg thread: {}", e);
-        }
-    });
+    if let Some(filename) = std::env::args().nth(1) {
+        std::thread::spawn(move || {
+            if let Err(e) = FrameStream::new(&filename).and_then(|mut s| {
+                WINDOW_STATE.lock().unwrap().fps = s.fps;
+                s.read_frames()
+            }) {
+                error!("Error in FFmpeg thread: {}", e);
+            }
+        });
+    }
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -207,11 +208,12 @@ unsafe fn draw_pulsing_circle(state: &WindowState, hdc_mem: HDC) {
         COLORREF(0x0000_00FF) // Blue otherwise
     };
     let hpen = CreatePen(PS_SOLID, 3, pen_color);
-    let old_pen = SelectObject(hdc_mem, hpen);
+    let old_pen = SelectObject(hdc_mem, hpen.into());
     let brush = CreateSolidBrush(COLORREF(0x0000_0000));
-    let old_brush = SelectObject(hdc_mem, brush);
+    let old_brush = SelectObject(hdc_mem, brush.into());
     let radius = (60.0 + (state.phase.sin() * 30.0)) as i32;
     let center = state.center();
+
     let _ = Ellipse(
         hdc_mem,
         center.x as i32 - radius,
@@ -220,9 +222,9 @@ unsafe fn draw_pulsing_circle(state: &WindowState, hdc_mem: HDC) {
         center.y as i32 + radius,
     );
     let _ = SelectObject(hdc_mem, old_pen);
-    let _ = DeleteObject(hpen);
+    let _ = DeleteObject(hpen.into());
     let _ = SelectObject(hdc_mem, old_brush);
-    let _ = DeleteObject(brush);
+    let _ = DeleteObject(brush.into());
 }
 
 fn draw_gdi(window: &Window) {
@@ -232,8 +234,8 @@ fn draw_gdi(window: &Window) {
             _ => unimplemented!("Unsupported platform"),
         };
 
-        let hdc_screen = GetDC(hwnd);
-        let hdc_mem = CreateCompatibleDC(hdc_screen);
+        let hdc_screen = GetDC(Some(hwnd));
+        let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
 
         let state = WINDOW_STATE.lock().unwrap();
         let width = state.size.width as i32;
@@ -264,18 +266,19 @@ fn draw_gdi(window: &Window) {
 
         let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let hbitmap = CreateDIBSection(
-            hdc_mem,
+            Some(hdc_mem),
             &raw const bmi,
             DIB_RGB_COLORS,
             &raw mut bits_ptr,
-            HANDLE::default(),
+            Some(HANDLE::default()),
             0,
         )
         .unwrap_or_default();
-        let old_bmp = SelectObject(hdc_mem, hbitmap);
+        let old_bmp = SelectObject(hdc_mem, hbitmap.into());
 
         if !bits_ptr.is_null() {
             let buffer_size = (width * height * 4) as usize;
+            // SAFETY: bits_ptr is guaranteed to be valid by CreateDIBSection
             let dst = std::slice::from_raw_parts_mut(bits_ptr.cast::<u8>(), buffer_size);
 
             // Fill with arbitrary image data (BGRA)
@@ -334,13 +337,23 @@ fn draw_gdi(window: &Window) {
         draw_pulsing_circle(&state, hdc_mem);
 
         // Blit to screen
-        let _ = BitBlt(hdc_screen, 0, 0, width, height, hdc_mem, 0, 0, SRCCOPY);
+        let _ = BitBlt(
+            hdc_screen,
+            0,
+            0,
+            width,
+            height,
+            Some(hdc_mem),
+            0,
+            0,
+            SRCCOPY,
+        );
 
         // Clean up
         SelectObject(hdc_mem, old_bmp);
-        let _ = DeleteObject(hbitmap);
+        let _ = DeleteObject(hbitmap.into());
         let _ = DeleteDC(hdc_mem);
-        ReleaseDC(hwnd, hdc_screen);
+        ReleaseDC(Some(hwnd), hdc_screen);
     }
 }
 
@@ -376,12 +389,12 @@ unsafe extern "system" fn custom_wndproc(
 
     // Intercept maximize command and double-click to go fullscreen instead
     if msg == WM_SYSCOMMAND && (wparam.0 & 0xFFF0) == SC_MAXIMIZE as usize {
-        toggle_fullscreen(hwnd);
+        unsafe { toggle_fullscreen(hwnd) };
         return LRESULT(0);
     }
 
     if msg == WM_NCLBUTTONDBLCLK {
-        toggle_fullscreen(hwnd);
+        unsafe { toggle_fullscreen(hwnd) };
         return LRESULT(0);
     }
 
@@ -404,7 +417,7 @@ unsafe fn toggle_fullscreen(hwnd: HWND) {
         // Restore to normal size
         let _ = SetWindowPos(
             hwnd,
-            HWND_TOP,
+            Some(HWND_TOP),
             SAVED_POSITION.0,
             SAVED_POSITION.1,
             SAVED_SIZE.0,
@@ -433,7 +446,7 @@ unsafe fn toggle_fullscreen(hwnd: HWND) {
         // Set to fullscreen
         let _ = SetWindowPos(
             hwnd,
-            HWND_TOP,
+            Some(HWND_TOP),
             0,
             0,
             screen_width,
@@ -462,7 +475,11 @@ fn setup_click_through(window: &Window) {
         OLD_WNDPROC = Some(std::mem::transmute::<isize, WNDPROC>(old_proc));
 
         // Set our custom window procedure
-        SetWindowLongPtrW(hwnd, GWL_WNDPROC, custom_wndproc as usize as isize);
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_WNDPROC,
+            custom_wndproc as *const () as usize as isize,
+        );
 
         debug!("Click-through enabled");
     }
