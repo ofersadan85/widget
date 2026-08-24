@@ -13,9 +13,7 @@ use winit::{
     platform::windows::WindowAttributesExtWindows,
     window::{Window, WindowAttributes, WindowId, WindowLevel},
 };
-use winsafe::{
-    BITMAPINFO, HBRUSH, HPEN, HWND, POINT, RECT, SIZE, SysResult, WNDPROC, co, guard::DeleteDCGuard,
-};
+use winsafe::{HWND, WNDPROC, co};
 
 mod error;
 use error::Result;
@@ -23,6 +21,10 @@ mod ff;
 use ff::FrameStream;
 mod colors;
 use colors::{BLACK, BLUE, GREEN};
+mod state;
+use state::{GLOBAL_STATE, custom_wndproc};
+
+use crate::state::toggle_fullscreen;
 
 const TRANSPARENCY: u8 = 100;
 
@@ -36,10 +38,6 @@ struct App {
     pub position: PhysicalPosition<i32>,
     pub size: PhysicalSize<u32>,
     pub fps: i32,
-    // pub is_fullscreen: bool,
-    pub old_proc: Option<winsafe::WNDPROC>,
-    // pub old_position: PhysicalPosition<i32>,
-    // pub old_size: PhysicalSize<u32>,
     pub size_sync: Option<mpsc::Sender<PhysicalSize<u32>>>,
     pub frame_sync: Option<mpsc::Receiver<ffmpeg_next::frame::Video>>,
     pub frame: ffmpeg_next::frame::Video,
@@ -57,10 +55,6 @@ impl App {
             position: PhysicalPosition::new(900, 100),
             size: PhysicalSize::new(400, 300),
             fps: 30,
-            // is_fullscreen: false,
-            old_proc: None,
-            // old_position: PhysicalPosition::new(900, 100),
-            // old_size: PhysicalSize::new(400, 300),
             size_sync: None,
             frame_sync: None,
             frame: ffmpeg_next::frame::Video::empty(),
@@ -72,14 +66,6 @@ impl App {
             x: f64::from(self.size.width) / 2.0,
             y: f64::from(self.size.height) / 2.0,
         }
-    }
-
-    fn cursor_in_circle(&self, cursor_pos: PhysicalPosition<f64>) -> bool {
-        let center = self.center();
-        let dx = cursor_pos.x - center.x;
-        let dy = cursor_pos.y - center.y;
-        let radius = 60.0 + (f64::from(self.phase.sin()) * 30.0);
-        dx * dx + dy * dy < radius * radius
     }
 
     fn frame_interval(&self) -> Duration {
@@ -162,7 +148,7 @@ impl App {
         let width = self.size.width as i32;
         let height = self.size.height as i32;
         let bitmap = hdc_screen.CreateCompatibleBitmap(width, height)?;
-        let mut bmi = BITMAPINFO::default();
+        let mut bmi = winsafe::BITMAPINFO::default();
         bmi.bmiHeader.biWidth = width;
         bmi.bmiHeader.biHeight = -height; // Negative for top-down bitmap
         bmi.bmiHeader.biPlanes = 1;
@@ -182,10 +168,10 @@ impl App {
 
         // Blit to screen
         hdc_screen.BitBlt(
-            POINT::new(),
-            SIZE::with(width, height),
+            winsafe::POINT::new(),
+            winsafe::SIZE::with(width, height),
             &hdc_mem,
-            POINT::new(),
+            winsafe::POINT::new(),
             co::ROP::SRCCOPY,
         )?;
         Ok(())
@@ -224,16 +210,17 @@ impl ApplicationHandler for App {
         let old_proc = hwnd.GetWindowLongPtr(co::GWLP::WNDPROC);
         // Safety: This is known to be a valid WNDPROC pointer,
         // and we are storing it in a safe way to call later.
-        self.old_proc = Some(unsafe { std::mem::transmute::<isize, WNDPROC>(old_proc) });
+        GLOBAL_STATE.lock().unwrap().old_proc =
+            Some(unsafe { std::mem::transmute::<isize, WNDPROC>(old_proc) });
         // Set our custom window procedure
         // Safety: the function we are casting has a valid signature for a window procedure,
         // and we are ensuring that the original window procedure is stored and called correctly.
-        // unsafe {
-        //     hwnd.SetWindowLongPtr(
-        //         co::GWLP::WNDPROC,
-        //         custom_wndproc as *const () as usize as isize,
-        //     )
-        // };
+        unsafe {
+            hwnd.SetWindowLongPtr(
+                co::GWLP::WNDPROC,
+                custom_wndproc as *const () as usize as isize,
+            )
+        };
         // Send the initial window size to the FFmpeg thread if the channel is available
         if let Some(size_tx) = &self.size_sync {
             let _ = size_tx.send(self.size);
@@ -254,7 +241,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 // position is window-relative, so we can use it directly for hover detection
-                self.hover = self.cursor_in_circle(position);
+                self.hover = cursor_in_circle(self.center(), self.phase, position);
             }
             WindowEvent::MouseInput {
                 state: element_state,
@@ -285,6 +272,7 @@ impl ApplicationHandler for App {
                         KeyCode::KeyS => movement.y = 10,
                         KeyCode::KeyA => movement.x = -10,
                         KeyCode::KeyD => movement.x = 10,
+                        KeyCode::KeyF => toggle_fullscreen(&self.hwnd()).expect("fullscreen"),
                         _ => {}
                     }
 
@@ -315,11 +303,61 @@ impl ApplicationHandler for App {
         if now.duration_since(self.last_frame_time) >= self.frame_interval() {
             self.last_frame_time = now;
             self.phase += 0.05;
+            GLOBAL_STATE.lock().unwrap().phase = self.phase;
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
         }
     }
+}
+
+fn draw_gradient(bitmap_buffer: &mut [u8], size: PhysicalSize<u32>, phase: f32) {
+    let red = ((phase % 1.0) * 255.0) as u8;
+    for y in 0..size.height {
+        for x in 0..size.width {
+            let i = ((y * size.width + x) * 4) as usize;
+            bitmap_buffer[i] = (x % 255) as u8;
+            bitmap_buffer[i + 1] = (y % 255) as u8;
+            bitmap_buffer[i + 2] = red;
+            bitmap_buffer[i + 3] = TRANSPARENCY;
+        }
+    }
+    trace!(
+        "No frame data available, drawing {} gradient",
+        bitmap_buffer.len()
+    );
+}
+
+fn draw_pulsing_circle(
+    hover: bool,
+    phase: f32,
+    center: PhysicalPosition<f64>,
+    hdc_mem: &winsafe::guard::DeleteDCGuard,
+) -> winsafe::SysResult<()> {
+    let pen_color = if hover { GREEN } else { BLUE };
+    let hpen = winsafe::HPEN::CreatePen(co::PS::SOLID, 3, pen_color)?;
+    let _pen_guard = hdc_mem.SelectObject(&*hpen)?;
+    let brush = winsafe::HBRUSH::CreateSolidBrush(BLACK)?;
+    let _brush_guard = hdc_mem.SelectObject(&*brush)?;
+    let radius = (60.0 + (phase.sin() * 30.0)) as i32;
+    let ellipse_rect = winsafe::RECT {
+        left: center.x as i32 - radius,
+        top: center.y as i32 - radius,
+        right: center.x as i32 + radius,
+        bottom: center.y as i32 + radius,
+    };
+    hdc_mem.Ellipse(ellipse_rect)
+}
+
+fn cursor_in_circle(
+    center: PhysicalPosition<f64>,
+    phase: f32,
+    cursor_pos: PhysicalPosition<f64>,
+) -> bool {
+    let dx = cursor_pos.x - center.x;
+    let dy = cursor_pos.y - center.y;
+    let radius = 60.0 + (f64::from(phase.sin()) * 30.0);
+    dx * dx + dy * dy < radius * radius
 }
 
 fn main() -> Result<()> {
@@ -344,125 +382,3 @@ fn main() -> Result<()> {
     event_loop.run_app(&mut app)?;
     Ok(())
 }
-
-fn draw_gradient(bitmap_buffer: &mut [u8], size: PhysicalSize<u32>, phase: f32) {
-    let red = ((phase % 1.0) * 255.0) as u8;
-    for y in 0..size.height {
-        for x in 0..size.width {
-            let i = ((y * size.width + x) * 4) as usize;
-            bitmap_buffer[i] = (x % 255) as u8;
-            bitmap_buffer[i + 1] = (y % 255) as u8;
-            bitmap_buffer[i + 2] = red;
-            bitmap_buffer[i + 3] = TRANSPARENCY;
-        }
-    }
-    trace!(
-        "No frame data available, drawing {} gradient",
-        bitmap_buffer.len()
-    );
-}
-
-fn draw_pulsing_circle(
-    hover: bool,
-    phase: f32,
-    center: PhysicalPosition<f64>,
-    hdc_mem: &DeleteDCGuard,
-) -> SysResult<()> {
-    let pen_color = if hover { GREEN } else { BLUE };
-    let hpen = HPEN::CreatePen(co::PS::SOLID, 3, pen_color)?;
-    let _pen_guard = hdc_mem.SelectObject(&*hpen)?;
-    let brush = HBRUSH::CreateSolidBrush(BLACK)?;
-    let _brush_guard = hdc_mem.SelectObject(&*brush)?;
-    let radius = (60.0 + (phase.sin() * 30.0)) as i32;
-    let ellipse_rect = RECT {
-        left: center.x as i32 - radius,
-        top: center.y as i32 - radius,
-        right: center.x as i32 + radius,
-        bottom: center.y as i32 + radius,
-    };
-    hdc_mem.Ellipse(ellipse_rect)?;
-    Ok(())
-}
-
-// #[expect(unused_variables)]
-// fn custom_wndproc(hwnd: HWND, msg: co::WM, wparam: usize, lparam: isize) -> isize {
-//     if msg == co::WM::NCHITTEST {
-//         // Get the cursor position from lparam (screen coordinates)
-//         let screen_x = i32::from((lparam & 0xFFFF) as i16);
-//         let screen_y = i32::from(((lparam >> 16) & 0xFFFF) as i16);
-
-//         // Get window position to convert to window coordinates
-//         if let Ok(rect) = hwnd.GetWindowRect() {
-//             let window_x = screen_x - rect.left;
-//             let window_y = screen_y - rect.top;
-
-//             // Check if the cursor is over the circle
-//             let state = WINDOW_STATE.lock().unwrap();
-//             let cursor_pos = PhysicalPosition::new(f64::from(window_x), f64::from(window_y));
-
-//             if App::cursor_in_circle(&state, cursor_pos) {
-//                 return co::HT::TRANSPARENT.raw() as isize; // Circle is click-through
-//             }
-//             return co::HT::CAPTION.raw() as isize; // Background is draggable
-//         }
-//     }
-
-//     // Intercept maximize command and double-click to go fullscreen instead
-//     if msg == co::WM::NCLBUTTONDBLCLK
-//         || (msg == co::WM::SYSCOMMAND && (wparam & 0xFFF0) == co::SC::MAXIMIZE.raw() as usize)
-//     {
-//         let _ = toggle_fullscreen(&hwnd);
-//         return 0;
-//     }
-
-//     // Call the original window procedure
-//     let old_proc = {
-//         let state = WINDOW_STATE.lock().unwrap();
-//         state.old_proc
-//     };
-//     if let Some(old_proc) = old_proc {
-//         old_proc(hwnd, msg, wparam, lparam)
-//     } else {
-//         0
-//     }
-// }
-
-// fn toggle_fullscreen(hwnd: &HWND) -> Result<()> {
-//     use winsafe::{GetSystemMetrics, HwndPlace};
-//     let (point, size) = {
-//         // The mutex needs to be dropped before going across `SetWindowPos`
-//         // because the Moved/Resized events will try to lock it again.
-//         let mut state = WINDOW_STATE.lock().unwrap();
-//         if state.is_fullscreen {
-//             // Restore to old position and size
-//             state.position = state.old_position;
-//             state.size = state.old_size;
-//             (
-//                 POINT::with(state.position.x, state.position.y),
-//                 SIZE::with(state.size.width as i32, state.size.height as i32),
-//             )
-//         } else {
-//             // Save current position and size before going fullscreen
-//             state.old_position = state.position;
-//             state.old_size = state.size;
-//             // Get full screen dimensions (including taskbar)
-//             (
-//                 POINT::new(),
-//                 SIZE::with(
-//                     GetSystemMetrics(co::SM::CXSCREEN),
-//                     GetSystemMetrics(co::SM::CYSCREEN),
-//                 ),
-//             )
-//         }
-//     };
-
-//     debug!(
-//         "Setting window position to ({}, {}), size ({}x{})",
-//         point.x, point.y, size.cx, size.cy
-//     );
-//     let resize_flags: co::SWP = co::SWP::FRAMECHANGED | co::SWP::NOACTIVATE;
-//     hwnd.SetWindowPos(HwndPlace::None, point, size, resize_flags)?;
-//     let mut state = WINDOW_STATE.lock().unwrap();
-//     state.is_fullscreen = !state.is_fullscreen;
-//     Ok(())
-// }
