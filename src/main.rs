@@ -26,8 +26,6 @@ use state::{GLOBAL_STATE, custom_wndproc};
 
 use crate::state::toggle_fullscreen;
 
-const TRANSPARENCY: u8 = 100;
-
 struct App {
     window: Option<Window>,
     last_frame_time: Instant,
@@ -41,6 +39,7 @@ struct App {
     pub size_sync: Option<mpsc::Sender<PhysicalSize<u32>>>,
     pub frame_sync: Option<mpsc::Receiver<ffmpeg_next::frame::Video>>,
     pub frame: ffmpeg_next::frame::Video,
+    pub transparency: u8,
 }
 
 impl App {
@@ -58,6 +57,7 @@ impl App {
             size_sync: None,
             frame_sync: None,
             frame: ffmpeg_next::frame::Video::empty(),
+            transparency: 128, // Default to 50% transparency
         }
     }
 
@@ -110,7 +110,12 @@ impl App {
         }
         // Fill the bitmap buffer with BGRA pixel data.
         if unsafe { self.frame.is_empty() } {
-            draw_gradient(&mut self.bitmap_buffer, self.size, self.phase);
+            draw_gradient(
+                &mut self.bitmap_buffer,
+                self.size,
+                self.phase,
+                self.transparency,
+            );
         } else if self.frame.width() == self.size.width && self.frame.height() == self.size.height {
             let copy_size = buffer_size.min(self.frame.data(0).len());
             if copy_size > 0 {
@@ -142,7 +147,7 @@ impl App {
         }
 
         for pixel in self.bitmap_buffer.chunks_mut(4) {
-            pixel[3] = TRANSPARENCY;
+            pixel[3] = self.transparency; // Set alpha channel for transparency
         }
 
         let width = self.size.width as i32;
@@ -273,6 +278,12 @@ impl ApplicationHandler for App {
                         KeyCode::KeyA => movement.x = -10,
                         KeyCode::KeyD => movement.x = 10,
                         KeyCode::KeyF => toggle_fullscreen(&self.hwnd()).expect("fullscreen"),
+                        KeyCode::Equal | KeyCode::NumpadAdd => {
+                            self.transparency = self.transparency.saturating_add(10)
+                        }
+                        KeyCode::Minus | KeyCode::NumpadSubtract => {
+                            self.transparency = self.transparency.saturating_sub(10)
+                        }
                         _ => {}
                     }
 
@@ -311,7 +322,7 @@ impl ApplicationHandler for App {
     }
 }
 
-fn draw_gradient(bitmap_buffer: &mut [u8], size: PhysicalSize<u32>, phase: f32) {
+fn draw_gradient(bitmap_buffer: &mut [u8], size: PhysicalSize<u32>, phase: f32, transparency: u8) {
     let red = ((phase % 1.0) * 255.0) as u8;
     for y in 0..size.height {
         for x in 0..size.width {
@@ -319,7 +330,7 @@ fn draw_gradient(bitmap_buffer: &mut [u8], size: PhysicalSize<u32>, phase: f32) 
             bitmap_buffer[i] = (x % 255) as u8;
             bitmap_buffer[i + 1] = (y % 255) as u8;
             bitmap_buffer[i + 2] = red;
-            bitmap_buffer[i + 3] = TRANSPARENCY;
+            bitmap_buffer[i + 3] = transparency;
         }
     }
     trace!(
