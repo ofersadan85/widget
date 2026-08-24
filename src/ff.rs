@@ -4,6 +4,7 @@ use ffmpeg_next::{
     software::scaling::{context::Context as Scaler, flag::Flags},
     util::format::pixel::Pixel,
 };
+use std::path::PathBuf;
 use std::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 use winit::dpi::PhysicalSize;
@@ -11,7 +12,7 @@ use winit::dpi::PhysicalSize;
 use crate::error::Result;
 
 pub struct FrameStream {
-    pub input: String,
+    pub input: PathBuf,
     pub fps: i32,
     pub size_sync: mpsc::Receiver<PhysicalSize<u32>>,
     pub frame_sync: mpsc::Sender<frame::Video>,
@@ -21,12 +22,12 @@ pub struct FrameStream {
 
 impl FrameStream {
     pub fn new(
-        input: &str,
+        input: PathBuf,
         size_sync: mpsc::Receiver<PhysicalSize<u32>>,
         frame_sync: mpsc::Sender<frame::Video>,
     ) -> Self {
         Self {
-            input: input.to_string(),
+            input,
             fps: 0,
             size_sync,
             frame_sync,
