@@ -279,10 +279,10 @@ impl ApplicationHandler for App {
                         KeyCode::KeyD => movement.x = 10,
                         KeyCode::KeyF => toggle_fullscreen(&self.hwnd()).expect("fullscreen"),
                         KeyCode::Equal | KeyCode::NumpadAdd => {
-                            self.transparency = self.transparency.saturating_add(10)
+                            self.transparency = self.transparency.saturating_add(10);
                         }
                         KeyCode::Minus | KeyCode::NumpadSubtract => {
-                            self.transparency = self.transparency.saturating_sub(10)
+                            self.transparency = self.transparency.saturating_sub(10);
                         }
                         _ => {}
                     }

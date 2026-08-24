@@ -2,7 +2,7 @@ use ffmpeg_next as ffmpeg;
 use ffmpeg_next::{
     codec, format, frame, media,
     software::scaling::{context::Context as Scaler, flag::Flags},
-    util::format::pixel,
+    util::format::pixel::Pixel,
 };
 use std::sync::mpsc;
 use tracing::{debug, info, trace, warn};
@@ -58,7 +58,7 @@ impl FrameStream {
             decoder.format(),
             decoder.width(),
             decoder.height(),
-            pixel::Pixel::BGRA,
+            Pixel::BGRA,
             1,
             1,
             Flags::BILINEAR,
@@ -76,7 +76,7 @@ impl FrameStream {
                                 decoder.format(),
                                 decoder.width(),
                                 decoder.height(),
-                                pixel::Pixel::BGRA,
+                                Pixel::BGRA,
                                 new_size.width,
                                 new_size.height,
                                 Flags::BILINEAR,
