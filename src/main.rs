@@ -1,5 +1,8 @@
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::time::{Duration, Instant};
+use std::{
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 use tracing::{debug, error, trace};
 use winit::{
     application::ApplicationHandler,
@@ -11,16 +14,13 @@ use winit::{
     window::{Window, WindowAttributes, WindowId, WindowLevel},
 };
 use winsafe::{
-    BITMAPINFO, GetSystemMetrics, HBRUSH, HPEN, HWND, HwndPlace, POINT, RECT, SIZE, SysResult,
-    WNDPROC, co, guard::DeleteDCGuard,
+    BITMAPINFO, HBRUSH, HPEN, HWND, POINT, RECT, SIZE, SysResult, WNDPROC, co, guard::DeleteDCGuard,
 };
 
 mod error;
 use error::Result;
 mod ff;
 use ff::FrameStream;
-mod state;
-use state::{FRAME_SYNC, WINDOW_STATE, WindowState};
 mod colors;
 use colors::{BLACK, BLUE, GREEN};
 
@@ -30,6 +30,19 @@ struct App {
     window: Option<Window>,
     last_frame_time: Instant,
     bitmap_buffer: Vec<u8>,
+    pub title: String,
+    pub hover: bool,
+    pub phase: f32,
+    pub position: PhysicalPosition<i32>,
+    pub size: PhysicalSize<u32>,
+    pub fps: i32,
+    // pub is_fullscreen: bool,
+    pub old_proc: Option<winsafe::WNDPROC>,
+    // pub old_position: PhysicalPosition<i32>,
+    // pub old_size: PhysicalSize<u32>,
+    pub size_sync: Option<mpsc::Sender<PhysicalSize<u32>>>,
+    pub frame_sync: Option<mpsc::Receiver<ffmpeg_next::frame::Video>>,
+    pub frame: ffmpeg_next::frame::Video,
 }
 
 impl App {
@@ -38,24 +51,144 @@ impl App {
             window: None,
             last_frame_time: Instant::now(),
             bitmap_buffer: Vec::new(),
+            title: String::from("AmazingWidget"),
+            hover: false,
+            phase: 0.0,
+            position: PhysicalPosition::new(900, 100),
+            size: PhysicalSize::new(400, 300),
+            fps: 30,
+            // is_fullscreen: false,
+            old_proc: None,
+            // old_position: PhysicalPosition::new(900, 100),
+            // old_size: PhysicalSize::new(400, 300),
+            size_sync: None,
+            frame_sync: None,
+            frame: ffmpeg_next::frame::Video::empty(),
         }
     }
 
-    fn cursor_in_circle(state: &WindowState, cursor_pos: PhysicalPosition<f64>) -> bool {
-        let center = state.center();
+    pub fn center(&self) -> PhysicalPosition<f64> {
+        PhysicalPosition {
+            x: f64::from(self.size.width) / 2.0,
+            y: f64::from(self.size.height) / 2.0,
+        }
+    }
+
+    fn cursor_in_circle(&self, cursor_pos: PhysicalPosition<f64>) -> bool {
+        let center = self.center();
         let dx = cursor_pos.x - center.x;
         let dy = cursor_pos.y - center.y;
-        let radius = 60.0 + (f64::from(state.phase.sin()) * 30.0);
+        let radius = 60.0 + (f64::from(self.phase.sin()) * 30.0);
         dx * dx + dy * dy < radius * radius
     }
 
     fn frame_interval(&self) -> Duration {
-        let fps = WINDOW_STATE.lock().unwrap().fps;
-        if fps > 0 {
-            Duration::from_secs_f64(1.0 / f64::from(fps))
+        if self.fps > 0 {
+            Duration::from_secs_f64(1.0 / f64::from(self.fps))
         } else {
             Duration::from_millis(16) // Default to ~60 FPS if fps is not set
         }
+    }
+
+    fn hwnd(&self) -> HWND {
+        match self
+            .window
+            .as_ref()
+            .expect("tried to access window handle before window creation")
+            .window_handle()
+            .expect("tried to access window handle on another thread")
+            .as_raw()
+        {
+            // Safety: We are accessing a valid HWND pointer from the window handle
+            RawWindowHandle::Win32(handle) => unsafe { HWND::from_ptr(handle.hwnd.get() as _) },
+            _ => unimplemented!("Unsupported platform"),
+        }
+    }
+
+    fn draw_gdi(&mut self) -> Result<()> {
+        let hwnd = self.hwnd();
+        let hdc_screen = hwnd.GetDC()?;
+        let hdc_mem = hdc_screen.CreateCompatibleDC()?;
+        trace!(
+            "Drawing at position ({}, {}), size ({}, {})",
+            self.position.x, self.position.y, self.size.width, self.size.height,
+        );
+
+        let buffer_size = (self.size.width * self.size.height * 4) as usize;
+        self.bitmap_buffer.resize(buffer_size, 0);
+
+        if let Some(frame_rx) = &self.frame_sync
+            && let Ok(frame) = frame_rx.try_recv()
+        {
+            self.frame = frame;
+        }
+        // Fill the bitmap buffer with BGRA pixel data.
+        if unsafe { self.frame.is_empty() } {
+            draw_gradient(&mut self.bitmap_buffer, self.size, self.phase);
+        } else if self.frame.width() == self.size.width && self.frame.height() == self.size.height {
+            let copy_size = buffer_size.min(self.frame.data(0).len());
+            if copy_size > 0 {
+                self.bitmap_buffer[..copy_size].copy_from_slice(&self.frame.data(0)[..copy_size]);
+            }
+        } else {
+            trace!(
+                "Frame size mismatch: {}x{} vs window {}x{}",
+                self.frame.width(),
+                self.frame.height(),
+                self.size.width,
+                self.size.height
+            );
+
+            let min_height = self.frame.height().min(self.size.height);
+            let min_width = self.frame.width().min(self.size.width);
+            for y in 0..min_height {
+                let src_offset = (y * self.frame.width() * 4) as usize;
+                let dst_offset = (y * self.size.width * 4) as usize;
+                let line_size = (min_width * 4) as usize;
+
+                if src_offset + line_size <= self.frame.data(0).len()
+                    && dst_offset + line_size <= self.bitmap_buffer.len()
+                {
+                    self.bitmap_buffer[dst_offset..dst_offset + line_size]
+                        .copy_from_slice(&self.frame.data(0)[src_offset..src_offset + line_size]);
+                }
+            }
+        }
+
+        for pixel in self.bitmap_buffer.chunks_mut(4) {
+            pixel[3] = TRANSPARENCY;
+        }
+
+        let width = self.size.width as i32;
+        let height = self.size.height as i32;
+        let bitmap = hdc_screen.CreateCompatibleBitmap(width, height)?;
+        let mut bmi = BITMAPINFO::default();
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height; // Negative for top-down bitmap
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = co::BI::RGB;
+        hdc_mem.SetDIBits(
+            &bitmap,
+            0,
+            height as u32,
+            &self.bitmap_buffer,
+            &bmi,
+            co::DIB::RGB_COLORS,
+        )?;
+        let _bmp_guard = hdc_mem.SelectObject(&*bitmap)?;
+
+        draw_pulsing_circle(self.hover, self.phase, self.center(), &hdc_mem)?;
+
+        // Blit to screen
+        hdc_screen.BitBlt(
+            POINT::new(),
+            SIZE::with(width, height),
+            &hdc_mem,
+            POINT::new(),
+            co::ROP::SRCCOPY,
+        )?;
+        Ok(())
     }
 }
 
@@ -65,19 +198,16 @@ impl ApplicationHandler for App {
             return; // Window already created
         }
 
-        let window = {
-            let state = WINDOW_STATE.lock().unwrap();
-            event_loop.create_window(
-                WindowAttributes::default()
-                    .with_title(&state.title)
-                    .with_inner_size(state.size)
-                    .with_position(state.position)
-                    .with_decorations(false)
-                    .with_transparent(true)
-                    .with_window_level(WindowLevel::AlwaysOnTop)
-                    .with_skip_taskbar(true),
-            )
-        }; // Release the lock before potentially exiting the event loop
+        let window = event_loop.create_window(
+            WindowAttributes::default()
+                .with_title(&self.title)
+                .with_inner_size(self.size)
+                .with_position(self.position)
+                .with_decorations(false)
+                .with_transparent(true)
+                .with_window_level(WindowLevel::AlwaysOnTop)
+                .with_skip_taskbar(true),
+        );
         let window = match window {
             Ok(window) => window,
             Err(err) => {
@@ -87,28 +217,27 @@ impl ApplicationHandler for App {
             }
         };
 
-        let hwnd = window_to_hwnd(&window);
+        self.window = Some(window);
+        let hwnd = self.hwnd();
 
         // Store the original window procedure
         let old_proc = hwnd.GetWindowLongPtr(co::GWLP::WNDPROC);
         // Safety: This is known to be a valid WNDPROC pointer,
         // and we are storing it in a safe way to call later.
-        let old_proc: WNDPROC = unsafe { std::mem::transmute(old_proc) };
-        {
-            let mut state = WINDOW_STATE.lock().unwrap();
-            state.old_proc = Some(old_proc);
-        }
+        self.old_proc = Some(unsafe { std::mem::transmute::<isize, WNDPROC>(old_proc) });
         // Set our custom window procedure
         // Safety: the function we are casting has a valid signature for a window procedure,
         // and we are ensuring that the original window procedure is stored and called correctly.
-        unsafe {
-            hwnd.SetWindowLongPtr(
-                co::GWLP::WNDPROC,
-                custom_wndproc as *const () as usize as isize,
-            )
-        };
-
-        self.window = Some(window);
+        // unsafe {
+        //     hwnd.SetWindowLongPtr(
+        //         co::GWLP::WNDPROC,
+        //         custom_wndproc as *const () as usize as isize,
+        //     )
+        // };
+        // Send the initial window size to the FFmpeg thread if the channel is available
+        if let Some(size_tx) = &self.size_sync {
+            let _ = size_tx.send(self.size);
+        }
         debug!("Window created");
     }
 
@@ -119,27 +248,21 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                if let Some(window) = &self.window
-                    && let Err(err) = draw_gdi(window, &mut self.bitmap_buffer)
-                {
+                if let Err(err) = self.draw_gdi() {
                     error!("draw_gdi failed: {err}");
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let mut state = WINDOW_STATE.lock().unwrap();
                 // position is window-relative, so we can use it directly for hover detection
-                state.hover = Self::cursor_in_circle(&state, position);
+                self.hover = self.cursor_in_circle(position);
             }
             WindowEvent::MouseInput {
                 state: element_state,
                 button: MouseButton::Left,
                 ..
             } => {
-                if element_state == ElementState::Pressed {
-                    let state = WINDOW_STATE.lock().unwrap();
-                    if state.hover {
-                        debug!("Circle clicked!");
-                    }
+                if element_state == ElementState::Pressed && self.hover {
+                    debug!("Circle clicked!");
                 }
             }
             WindowEvent::KeyboardInput {
@@ -166,26 +289,22 @@ impl ApplicationHandler for App {
                     }
 
                     if movement.x != 0 || movement.y != 0 {
-                        let new_pos = {
-                            let mut state = WINDOW_STATE.lock().unwrap();
-                            state.position = PhysicalPosition::new(
-                                state.position.x + movement.x,
-                                state.position.y + movement.y,
-                            );
-                            state.position
-                        }; // Release the lock before calling set_outer_position
-                        window.set_outer_position(new_pos);
+                        self.position = PhysicalPosition::new(
+                            self.position.x + movement.x,
+                            self.position.y + movement.y,
+                        );
+                        window.set_outer_position(self.position);
                     }
                 }
             }
             WindowEvent::Moved(position) => {
-                let mut state = WINDOW_STATE.lock().unwrap();
-                state.position = position;
+                self.position = position;
             }
             WindowEvent::Resized(size) => {
-                let mut state = WINDOW_STATE.lock().unwrap();
-                state.size = size;
-                state.rescale_needed = true;
+                self.size = size;
+                if let Some(size_tx) = &self.size_sync {
+                    let _ = size_tx.send(size);
+                }
             }
             event => trace!("Unhandled window event: {event:?}"),
         }
@@ -195,13 +314,7 @@ impl ApplicationHandler for App {
         let now = Instant::now();
         if now.duration_since(self.last_frame_time) >= self.frame_interval() {
             self.last_frame_time = now;
-
-            {
-                let mut state = WINDOW_STATE.lock().unwrap();
-                state.phase += 0.05;
-                FRAME_SYNC.notify_one();
-            }
-
+            self.phase += 0.05;
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
@@ -212,24 +325,23 @@ impl ApplicationHandler for App {
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     ffmpeg_next::init()?;
-
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let mut app = App::new();
     if let Some(filename) = std::env::args().nth(1) {
+        let (size_tx, size_rx) = mpsc::channel();
+        let (frame_tx, frame_rx) = mpsc::channel();
+        app.size_sync = Some(size_tx);
+        app.frame_sync = Some(frame_rx);
+        let mut stream = FrameStream::new(&filename, size_rx, frame_tx);
         std::thread::spawn(move || {
-            if let Err(e) = FrameStream::new(&filename).and_then(|mut s| {
-                WINDOW_STATE.lock().unwrap().fps = s.fps;
-                s.read_frames()
-            }) {
-                error!("Error in FFmpeg thread: {}", e);
+            // app.fps = stream.fps; // TODO: Need to somehow sync FPS during read_frames
+            if let Err(e) = stream.read_frames() {
+                error!("Error in FFmpeg thread: {e}");
             }
         });
     }
-
-    let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
-
-    let mut app = App::new();
     event_loop.run_app(&mut app)?;
-
     Ok(())
 }
 
@@ -272,183 +384,85 @@ fn draw_pulsing_circle(
     Ok(())
 }
 
-fn draw_gdi(window: &Window, bitmap_buffer: &mut Vec<u8>) -> Result<()> {
-    let hwnd = window_to_hwnd(window);
-    let hdc_screen = hwnd.GetDC()?;
-    let hdc_mem = hdc_screen.CreateCompatibleDC()?;
-    let state = WINDOW_STATE.lock().expect("window state lock");
-    trace!(
-        "Drawing at position ({}, {}), size ({}, {}) frame: {}x{}",
-        state.position.x,
-        state.position.y,
-        state.size.width,
-        state.size.height,
-        state.frame.width(),
-        state.frame.height()
-    );
+// #[expect(unused_variables)]
+// fn custom_wndproc(hwnd: HWND, msg: co::WM, wparam: usize, lparam: isize) -> isize {
+//     if msg == co::WM::NCHITTEST {
+//         // Get the cursor position from lparam (screen coordinates)
+//         let screen_x = i32::from((lparam & 0xFFFF) as i16);
+//         let screen_y = i32::from(((lparam >> 16) & 0xFFFF) as i16);
 
-    let buffer_size = (state.size.width * state.size.height * 4) as usize;
-    bitmap_buffer.resize(buffer_size, 0);
+//         // Get window position to convert to window coordinates
+//         if let Ok(rect) = hwnd.GetWindowRect() {
+//             let window_x = screen_x - rect.left;
+//             let window_y = screen_y - rect.top;
 
-    // Fill the bitmap buffer with BGRA pixel data.
-    if unsafe { state.frame.is_empty() } {
-        draw_gradient(bitmap_buffer, state.size, state.phase);
-    } else if state.frame.width() == state.size.width && state.frame.height() == state.size.height {
-        let copy_size = buffer_size.min(state.frame.data(0).len());
-        if copy_size > 0 {
-            bitmap_buffer[..copy_size].copy_from_slice(&state.frame.data(0)[..copy_size]);
-        }
-    } else {
-        trace!(
-            "Frame size mismatch: {}x{} vs window {}x{}",
-            state.frame.width(),
-            state.frame.height(),
-            state.size.width,
-            state.size.height
-        );
+//             // Check if the cursor is over the circle
+//             let state = WINDOW_STATE.lock().unwrap();
+//             let cursor_pos = PhysicalPosition::new(f64::from(window_x), f64::from(window_y));
 
-        let min_height = state.frame.height().min(state.size.height);
-        let min_width = state.frame.width().min(state.size.width);
-        for y in 0..min_height {
-            let src_offset = (y * state.frame.width() * 4) as usize;
-            let dst_offset = (y * state.size.width * 4) as usize;
-            let line_size = (min_width * 4) as usize;
+//             if App::cursor_in_circle(&state, cursor_pos) {
+//                 return co::HT::TRANSPARENT.raw() as isize; // Circle is click-through
+//             }
+//             return co::HT::CAPTION.raw() as isize; // Background is draggable
+//         }
+//     }
 
-            if src_offset + line_size <= state.frame.data(0).len()
-                && dst_offset + line_size <= bitmap_buffer.len()
-            {
-                bitmap_buffer[dst_offset..dst_offset + line_size]
-                    .copy_from_slice(&state.frame.data(0)[src_offset..src_offset + line_size]);
-            }
-        }
-    }
+//     // Intercept maximize command and double-click to go fullscreen instead
+//     if msg == co::WM::NCLBUTTONDBLCLK
+//         || (msg == co::WM::SYSCOMMAND && (wparam & 0xFFF0) == co::SC::MAXIMIZE.raw() as usize)
+//     {
+//         let _ = toggle_fullscreen(&hwnd);
+//         return 0;
+//     }
 
-    for pixel in bitmap_buffer.chunks_mut(4) {
-        pixel[3] = TRANSPARENCY;
-    }
+//     // Call the original window procedure
+//     let old_proc = {
+//         let state = WINDOW_STATE.lock().unwrap();
+//         state.old_proc
+//     };
+//     if let Some(old_proc) = old_proc {
+//         old_proc(hwnd, msg, wparam, lparam)
+//     } else {
+//         0
+//     }
+// }
 
-    let width = state.size.width as i32;
-    let height = state.size.height as i32;
-    let bitmap = hdc_screen.CreateCompatibleBitmap(width, height)?;
-    let mut bmi = BITMAPINFO::default();
-    bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height; // Negative for top-down bitmap
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = co::BI::RGB;
-    hdc_mem.SetDIBits(
-        &bitmap,
-        0,
-        height as u32,
-        bitmap_buffer,
-        &bmi,
-        co::DIB::RGB_COLORS,
-    )?;
-    let _bmp_guard = hdc_mem.SelectObject(&*bitmap)?;
+// fn toggle_fullscreen(hwnd: &HWND) -> Result<()> {
+//     use winsafe::{GetSystemMetrics, HwndPlace};
+//     let (point, size) = {
+//         // The mutex needs to be dropped before going across `SetWindowPos`
+//         // because the Moved/Resized events will try to lock it again.
+//         let mut state = WINDOW_STATE.lock().unwrap();
+//         if state.is_fullscreen {
+//             // Restore to old position and size
+//             state.position = state.old_position;
+//             state.size = state.old_size;
+//             (
+//                 POINT::with(state.position.x, state.position.y),
+//                 SIZE::with(state.size.width as i32, state.size.height as i32),
+//             )
+//         } else {
+//             // Save current position and size before going fullscreen
+//             state.old_position = state.position;
+//             state.old_size = state.size;
+//             // Get full screen dimensions (including taskbar)
+//             (
+//                 POINT::new(),
+//                 SIZE::with(
+//                     GetSystemMetrics(co::SM::CXSCREEN),
+//                     GetSystemMetrics(co::SM::CYSCREEN),
+//                 ),
+//             )
+//         }
+//     };
 
-    draw_pulsing_circle(state.hover, state.phase, state.center(), &hdc_mem)?;
-
-    // Blit to screen
-    hdc_screen.BitBlt(
-        POINT::new(),
-        SIZE::with(width, height),
-        &hdc_mem,
-        POINT::new(),
-        co::ROP::SRCCOPY,
-    )?;
-    Ok(())
-}
-
-fn custom_wndproc(hwnd: HWND, msg: co::WM, wparam: usize, lparam: isize) -> isize {
-    if msg == co::WM::NCHITTEST {
-        // Get the cursor position from lparam (screen coordinates)
-        let screen_x = i32::from((lparam & 0xFFFF) as i16);
-        let screen_y = i32::from(((lparam >> 16) & 0xFFFF) as i16);
-
-        // Get window position to convert to window coordinates
-        if let Ok(rect) = hwnd.GetWindowRect() {
-            let window_x = screen_x - rect.left;
-            let window_y = screen_y - rect.top;
-
-            // Check if the cursor is over the circle
-            let state = WINDOW_STATE.lock().unwrap();
-            let cursor_pos = PhysicalPosition::new(f64::from(window_x), f64::from(window_y));
-
-            if App::cursor_in_circle(&state, cursor_pos) {
-                return co::HT::TRANSPARENT.raw() as isize; // Circle is click-through
-            }
-            return co::HT::CAPTION.raw() as isize; // Background is draggable
-        }
-    }
-
-    // Intercept maximize command and double-click to go fullscreen instead
-    if msg == co::WM::NCLBUTTONDBLCLK
-        || (msg == co::WM::SYSCOMMAND && (wparam & 0xFFF0) == co::SC::MAXIMIZE.raw() as usize)
-    {
-        let _ = toggle_fullscreen(&hwnd);
-        return 0;
-    }
-
-    // Call the original window procedure
-    let old_proc = {
-        let state = WINDOW_STATE.lock().unwrap();
-        state.old_proc
-    };
-    if let Some(old_proc) = old_proc {
-        old_proc(hwnd, msg, wparam, lparam)
-    } else {
-        0
-    }
-}
-
-fn toggle_fullscreen(hwnd: &HWND) -> Result<()> {
-    let (point, size) = {
-        // The mutex needs to be dropped before going across `SetWindowPos`
-        // because the Moved/Resized events will try to lock it again.
-        let mut state = WINDOW_STATE.lock().unwrap();
-        if state.is_fullscreen {
-            // Restore to old position and size
-            state.position = state.old_position;
-            state.size = state.old_size;
-            (
-                POINT::with(state.position.x, state.position.y),
-                SIZE::with(state.size.width as i32, state.size.height as i32),
-            )
-        } else {
-            // Save current position and size before going fullscreen
-            state.old_position = state.position;
-            state.old_size = state.size;
-            // Get full screen dimensions (including taskbar)
-            (
-                POINT::new(),
-                SIZE::with(
-                    GetSystemMetrics(co::SM::CXSCREEN),
-                    GetSystemMetrics(co::SM::CYSCREEN),
-                ),
-            )
-        }
-    };
-
-    debug!(
-        "Setting window position to ({}, {}), size ({}x{})",
-        point.x, point.y, size.cx, size.cy
-    );
-    let resize_flags: co::SWP = co::SWP::FRAMECHANGED | co::SWP::NOACTIVATE;
-    hwnd.SetWindowPos(HwndPlace::None, point, size, resize_flags)?;
-    let mut state = WINDOW_STATE.lock().unwrap();
-    state.is_fullscreen = !state.is_fullscreen;
-    state.rescale_needed = true;
-    Ok(())
-}
-
-fn window_to_hwnd(window: &Window) -> HWND {
-    match window
-        .window_handle()
-        .expect("tried to access window handle on another thread")
-        .as_raw()
-    {
-        // Safety: We are accessing a valid HWND pointer from the window handle
-        RawWindowHandle::Win32(handle) => unsafe { HWND::from_ptr(handle.hwnd.get() as _) },
-        _ => unimplemented!("Unsupported platform"),
-    }
-}
+//     debug!(
+//         "Setting window position to ({}, {}), size ({}x{})",
+//         point.x, point.y, size.cx, size.cy
+//     );
+//     let resize_flags: co::SWP = co::SWP::FRAMECHANGED | co::SWP::NOACTIVATE;
+//     hwnd.SetWindowPos(HwndPlace::None, point, size, resize_flags)?;
+//     let mut state = WINDOW_STATE.lock().unwrap();
+//     state.is_fullscreen = !state.is_fullscreen;
+//     Ok(())
+// }

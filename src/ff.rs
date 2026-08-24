@@ -4,30 +4,47 @@ use ffmpeg_next::{
     software::scaling::{context::Context as Scaler, flag::Flags},
     util::format::pixel,
 };
+use std::sync::mpsc;
 use tracing::{debug, info, trace, warn};
+use winit::dpi::PhysicalSize;
 
 use crate::error::Result;
-use crate::state::{FRAME_SYNC, WINDOW_STATE};
 
 pub struct FrameStream {
-    pub input: format::context::Input,
-    pub video_index: usize,
-    pub decoder: codec::decoder::Video,
-    pub scaler: Scaler,
+    pub input: String,
     pub fps: i32,
+    pub size_sync: mpsc::Receiver<PhysicalSize<u32>>,
+    pub frame_sync: mpsc::Sender<frame::Video>,
+    pub frame_buffer_before: frame::Video,
+    pub frame_buffer_after: frame::Video,
 }
 
 impl FrameStream {
-    pub fn new(input: &str) -> Result<Self> {
-        let input = format::input(&input)?;
+    pub fn new(
+        input: &str,
+        size_sync: mpsc::Receiver<PhysicalSize<u32>>,
+        frame_sync: mpsc::Sender<frame::Video>,
+    ) -> Self {
+        Self {
+            input: input.to_string(),
+            fps: 0,
+            size_sync,
+            frame_sync,
+            frame_buffer_before: frame::Video::empty(),
+            frame_buffer_after: frame::Video::empty(),
+        }
+    }
+
+    pub fn read_frames(&mut self) -> Result<()> {
+        let mut input = format::input(&self.input)?;
         let video = input
             .streams()
             .best(media::Type::Video)
             .ok_or(ffmpeg::Error::StreamNotFound)?;
         let video_index = video.index();
-        let fps = video.avg_frame_rate().0;
+        self.fps = video.avg_frame_rate().0;
         let codec_params = video.parameters();
-        let decoder = if let Some(hw_codec) = codec::decoder::find_by_name("h264_cuvid") {
+        let mut decoder = if let Some(hw_codec) = codec::decoder::find_by_name("h264_cuvid") {
             info!("✅ Using CUDA hardware decoder: h264_cuvid");
             let mut ctx = codec::context::Context::new_with_codec(hw_codec);
             ctx.set_parameters(codec_params)?;
@@ -37,71 +54,43 @@ impl FrameStream {
             let codec = codec::context::Context::from_parameters(codec_params)?;
             codec.decoder().video()?
         };
-
-        // Get initial window size for scaling
-        let mut state = WINDOW_STATE.lock().unwrap();
-        state.fps = fps;
-        let scaler = Scaler::get(
+        let mut scaler = Scaler::get(
             decoder.format(),
             decoder.width(),
             decoder.height(),
             pixel::Pixel::BGRA,
-            state.size.width,
-            state.size.height,
+            1,
+            1,
             Flags::BILINEAR,
         )?;
-        Ok(Self {
-            input,
-            video_index,
-            decoder,
-            scaler,
-            fps,
-        })
-    }
-
-    pub fn read_frames(&mut self) -> Result<()> {
-        let mut frame = frame::Video::empty();
         let mut i = 0;
-        for (stream, packet) in self.input.packets() {
-            if stream.index() == self.video_index {
-                self.decoder.send_packet(&packet)?;
-                while self.decoder.receive_frame(&mut frame).is_ok() {
-                    // Check if we need to recreate the scaler due to window resize
-                    let rescale_needed = {
-                        let state = WINDOW_STATE.lock().unwrap();
-                        state.rescale_needed
-                    };
-
-                    if rescale_needed {
-                        let (new_width, new_height) = {
-                            let mut state = WINDOW_STATE.lock().unwrap();
-                            state.rescale_needed = false;
-                            (state.size.width, state.size.height)
-                        };
-
-                        debug!(
-                            "Recreating scaler for new size: {}x{}",
-                            new_width, new_height
-                        );
-                        self.scaler = Scaler::get(
-                            self.decoder.format(),
-                            self.decoder.width(),
-                            self.decoder.height(),
-                            pixel::Pixel::BGRA,
-                            new_width,
-                            new_height,
-                            Flags::BILINEAR,
-                        )?;
+        for (stream, packet) in input.packets() {
+            if stream.index() == video_index {
+                decoder.send_packet(&packet)?;
+                while decoder.receive_frame(&mut self.frame_buffer_before).is_ok() {
+                    while let Ok(new_size) = self.size_sync.try_recv() {
+                        let output = scaler.output();
+                        if output.width != new_size.width || output.height != new_size.height {
+                            // We need to recreate the scaler due to window resize
+                            scaler = Scaler::get(
+                                decoder.format(),
+                                decoder.width(),
+                                decoder.height(),
+                                pixel::Pixel::BGRA,
+                                new_size.width,
+                                new_size.height,
+                                Flags::BILINEAR,
+                            )?;
+                        }
                     }
-
-                    let mut state = FRAME_SYNC.wait(WINDOW_STATE.lock().unwrap()).unwrap();
-                    self.scaler.run(&frame, &mut state.frame)?;
+                    scaler.run(&self.frame_buffer_before, &mut self.frame_buffer_after)?;
+                    self.frame_sync.send(self.frame_buffer_after.clone())?;
                     trace!("Frame\t{i}");
                     i += 1;
                 }
             }
         }
-        self.decoder.send_eof()?;
+        decoder.send_eof()?;
         debug!("End of stream reached");
         Ok(())
     }
