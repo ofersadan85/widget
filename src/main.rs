@@ -109,6 +109,7 @@ impl App {
             self.frame = frame;
         }
         // Fill the bitmap buffer with BGRA pixel data.
+        // Safety: we initialized ffmpeg properly
         if unsafe { self.frame.is_empty() } {
             draw_gradient(
                 &mut self.bitmap_buffer,
