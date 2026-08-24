@@ -39,18 +39,15 @@ impl FrameStream {
         };
 
         // Get initial window size for scaling
-        let window_size = {
-            let state = WINDOW_STATE.lock().unwrap();
-            (state.size.width, state.size.height)
-        };
-
+        let mut state = WINDOW_STATE.lock().unwrap();
+        state.fps = fps;
         let scaler = Scaler::get(
             decoder.format(),
             decoder.width(),
             decoder.height(),
             pixel::Pixel::BGRA,
-            window_size.0,
-            window_size.1,
+            state.size.width,
+            state.size.height,
             Flags::BILINEAR,
         )?;
         Ok(Self {

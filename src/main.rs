@@ -29,38 +29,45 @@ const TRANSPARENCY: u8 = 100;
 struct App {
     window: Option<Window>,
     last_frame_time: Instant,
-    frame_interval: Duration,
     bitmap_buffer: Vec<u8>,
 }
 
 impl App {
     fn new() -> Self {
-        let fps = WINDOW_STATE.lock().unwrap().fps;
         Self {
             window: None,
             last_frame_time: Instant::now(),
-            frame_interval: Duration::from_millis((1000 / fps) as u64),
             bitmap_buffer: Vec::new(),
         }
     }
 
     fn cursor_in_circle(state: &WindowState, cursor_pos: PhysicalPosition<f64>) -> bool {
-        let dx = cursor_pos.x - state.center().x;
-        let dy = cursor_pos.y - state.center().y;
+        let center = state.center();
+        let dx = cursor_pos.x - center.x;
+        let dy = cursor_pos.y - center.y;
         let radius = 60.0 + (f64::from(state.phase.sin()) * 30.0);
         dx * dx + dy * dy < radius * radius
+    }
+
+    fn frame_interval(&self) -> Duration {
+        let fps = WINDOW_STATE.lock().unwrap().fps;
+        if fps > 0 {
+            Duration::from_secs_f64(1.0 / f64::from(fps))
+        } else {
+            Duration::from_millis(16) // Default to ~60 FPS if fps is not set
+        }
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
-            return;
+            return; // Window already created
         }
 
-        let state = WINDOW_STATE.lock().unwrap();
-        let window = event_loop
-            .create_window(
+        let window = {
+            let state = WINDOW_STATE.lock().unwrap();
+            event_loop.create_window(
                 WindowAttributes::default()
                     .with_title(&state.title)
                     .with_inner_size(state.size)
@@ -70,10 +77,36 @@ impl ApplicationHandler for App {
                     .with_window_level(WindowLevel::AlwaysOnTop)
                     .with_skip_taskbar(true),
             )
-            .unwrap();
-        drop(state); // Release the lock before calling setup_click_through
-        // Set up click-through for non-circle areas
-        setup_click_through(&window);
+        }; // Release the lock before potentially exiting the event loop
+        let window = match window {
+            Ok(window) => window,
+            Err(err) => {
+                error!("Failed to create window: {err}");
+                event_loop.exit();
+                return;
+            }
+        };
+
+        let hwnd = window_to_hwnd(&window);
+
+        // Store the original window procedure
+        let old_proc = hwnd.GetWindowLongPtr(co::GWLP::WNDPROC);
+        // Safety: This is known to be a valid WNDPROC pointer,
+        // and we are storing it in a safe way to call later.
+        let old_proc: WNDPROC = unsafe { std::mem::transmute(old_proc) };
+        {
+            let mut state = WINDOW_STATE.lock().unwrap();
+            state.old_proc = Some(old_proc);
+        }
+        // Set our custom window procedure
+        // Safety: the function we are casting has a valid signature for a window procedure,
+        // and we are ensuring that the original window procedure is stored and called correctly.
+        unsafe {
+            hwnd.SetWindowLongPtr(
+                co::GWLP::WNDPROC,
+                custom_wndproc as *const () as usize as isize,
+            )
+        };
 
         self.window = Some(window);
         debug!("Window created");
@@ -160,7 +193,7 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         let now = Instant::now();
-        if now.duration_since(self.last_frame_time) >= self.frame_interval {
+        if now.duration_since(self.last_frame_time) >= self.frame_interval() {
             self.last_frame_time = now;
 
             {
@@ -240,15 +273,7 @@ fn draw_pulsing_circle(
 }
 
 fn draw_gdi(window: &Window, bitmap_buffer: &mut Vec<u8>) -> Result<()> {
-    let hwnd = match window
-        .window_handle()
-        .expect("tried to access window handle on another thread")
-        .as_raw()
-    {
-        // Safety: We are accessing a valid HWND pointer from the window handle
-        RawWindowHandle::Win32(handle) => unsafe { HWND::from_ptr(handle.hwnd.get() as _) },
-        _ => unimplemented!("Unsupported platform"),
-    };
+    let hwnd = window_to_hwnd(window);
     let hdc_screen = hwnd.GetDC()?;
     let hdc_mem = hdc_screen.CreateCompatibleDC()?;
     let state = WINDOW_STATE.lock().expect("window state lock");
@@ -416,8 +441,8 @@ fn toggle_fullscreen(hwnd: &HWND) -> Result<()> {
     Ok(())
 }
 
-fn setup_click_through(window: &Window) {
-    let hwnd = match window
+fn window_to_hwnd(window: &Window) -> HWND {
+    match window
         .window_handle()
         .expect("tried to access window handle on another thread")
         .as_raw()
@@ -425,21 +450,5 @@ fn setup_click_through(window: &Window) {
         // Safety: We are accessing a valid HWND pointer from the window handle
         RawWindowHandle::Win32(handle) => unsafe { HWND::from_ptr(handle.hwnd.get() as _) },
         _ => unimplemented!("Unsupported platform"),
-    };
-    let mut state = WINDOW_STATE.lock().unwrap();
-
-    // Store the original window procedure
-    let old_proc = hwnd.GetWindowLongPtr(co::GWLP::WNDPROC);
-    let old_proc = unsafe { std::mem::transmute::<isize, WNDPROC>(old_proc) };
-    state.old_proc = Some(old_proc);
-
-    // Set our custom window procedure
-    unsafe {
-        hwnd.SetWindowLongPtr(
-            co::GWLP::WNDPROC,
-            custom_wndproc as *const () as usize as isize,
-        )
-    };
-
-    debug!("Click-through enabled");
+    }
 }
