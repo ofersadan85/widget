@@ -43,7 +43,7 @@ pub fn custom_wndproc(hwnd: HWND, msg: co::WM, wparam: usize, lparam: isize) -> 
                 let state = GLOBAL_STATE.lock().unwrap();
                 state.phase
             };
-            if crate::cursor_in_circle(center, phase, cursor_pos) {
+            if is_cursor_in_circle(center, phase, cursor_pos) {
                 return co::HT::TRANSPARENT.raw() as isize; // Circle is click-through
             }
             return co::HT::CAPTION.raw() as isize; // Background is draggable
@@ -115,4 +115,15 @@ pub fn toggle_fullscreen(hwnd: &HWND) -> crate::Result<()> {
         state.is_fullscreen = !state.is_fullscreen;
     }
     Ok(())
+}
+
+pub fn is_cursor_in_circle(
+    center: PhysicalPosition<f64>,
+    phase: f32,
+    cursor_pos: PhysicalPosition<f64>,
+) -> bool {
+    let dx = cursor_pos.x - center.x;
+    let dy = cursor_pos.y - center.y;
+    let radius = 60.0 + (f64::from(phase.sin()) * 30.0);
+    dx * dx + dy * dy < radius * radius
 }
