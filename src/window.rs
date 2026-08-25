@@ -273,7 +273,11 @@ impl App {
                 KeyCode::KeyA => self.position.x -= 10,
                 KeyCode::KeyD => self.position.x += 10,
                 KeyCode::KeyH => self.overlay_text.show = !self.overlay_text.show,
-                KeyCode::KeyF => toggle_fullscreen(&self.hwnd()).expect("fullscreen"),
+                KeyCode::KeyF => {
+                    if let Err(err) = toggle_fullscreen(&self.hwnd()) {
+                        error!("Failed to toggle fullscreen: {err}");
+                    }
+                }
                 KeyCode::Space => {
                     self.paused = !self.paused;
                     if let Some(command_tx) = &self.command_tx {
