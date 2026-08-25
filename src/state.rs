@@ -1,4 +1,5 @@
 use crate::overlay::hit_test_circle;
+use color_eyre::eyre::Context;
 use std::sync::{
     LazyLock, Mutex,
     atomic::{AtomicU64, Ordering},
@@ -125,7 +126,8 @@ pub fn toggle_fullscreen(hwnd: &HWND) -> crate::Result<()> {
         point.x, point.y, size.cx, size.cy
     );
     let resize_flags: co::SWP = co::SWP::FRAMECHANGED | co::SWP::NOACTIVATE;
-    hwnd.SetWindowPos(HwndPlace::None, point, size, resize_flags)?;
+    hwnd.SetWindowPos(HwndPlace::None, point, size, resize_flags)
+        .wrap_err("failed to resize window when toggling fullscreen")?;
     {
         let mut state = GLOBAL_STATE.lock().unwrap();
         state.is_fullscreen = !state.is_fullscreen;

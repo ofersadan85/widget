@@ -1,10 +1,10 @@
 use crate::{
     colors::BLACK,
-    error::Result,
     ff::{DecodedFrame, FrameStream, PlaybackCommand},
     overlay::{OverlayText, PulsingCircle, is_cursor_in_circle},
     state::{AtomicF64, GLOBAL_STATE, custom_wndproc, toggle_fullscreen},
 };
+use color_eyre::eyre::Result;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     path::Path,
@@ -125,7 +125,8 @@ impl App {
     pub fn run(&mut self) -> Result<()> {
         let event_loop = EventLoop::new()?;
         event_loop.set_control_flow(ControlFlow::Poll);
-        event_loop.run_app(self).map_err(Into::into)
+        event_loop.run_app(self)?;
+        Ok(())
     }
 
     pub fn center(&self) -> PhysicalPosition<f64> {

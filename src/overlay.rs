@@ -1,7 +1,5 @@
-use crate::{
-    colors::{BLACK, WHITE},
-    error::Result,
-};
+use crate::colors::{BLACK, WHITE};
+use color_eyre::eyre::{Context, Result};
 use std::fmt::{self, Write};
 use winit::dpi::PhysicalPosition;
 use winsafe::{
@@ -35,7 +33,8 @@ impl OverlayText {
             co::QUALITY::DEFAULT,
             co::PITCH::DEFAULT,
             "Segoe UI",
-        )?;
+        )
+        .wrap_err("failed to create overlay font 'Segoe UI'")?;
         Ok(Self {
             buffer: String::new(),
             show: true,

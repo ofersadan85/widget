@@ -1,3 +1,5 @@
+use crate::state::AtomicF64;
+use color_eyre::eyre::{Context, Result, eyre};
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::{
     Rational, codec, format, frame, media,
@@ -8,8 +10,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, atomic::Ordering, mpsc};
 use tracing::{debug, info, trace, warn};
 use winit::dpi::PhysicalSize;
-
-use crate::{error::Result, state::AtomicF64};
 
 /// `FFmpeg`'s internal timestamp unit for APIs that aren't tied to a stream's
 /// own `time_base` (`Input::seek`, `Input::duration`), in ticks per second.
@@ -75,11 +75,12 @@ impl FrameStream {
 
     #[expect(clippy::too_many_lines, clippy::cast_precision_loss)]
     pub fn read_frames(&mut self) -> Result<()> {
-        let mut input = format::input(&self.input)?;
+        let mut input = format::input(&self.input)
+            .wrap_err_with(|| format!("failed to open video input '{}'", self.input.display()))?;
         let video = input
             .streams()
             .best(media::Type::Video)
-            .ok_or(ffmpeg::Error::StreamNotFound)?;
+            .ok_or_else(|| eyre!("no video stream found in '{}'", self.input.display()))?;
         let video_index = video.index();
         let frame_rate = video.avg_frame_rate();
         let time_base = video.time_base();
@@ -95,12 +96,33 @@ impl FrameStream {
         let mut decoder = if let Some(hw_codec) = codec::decoder::find_by_name("h264_cuvid") {
             info!("✅ Using CUDA hardware decoder: h264_cuvid");
             let mut ctx = codec::context::Context::new_with_codec(hw_codec);
-            ctx.set_parameters(codec_params)?;
-            ctx.decoder().video()?
+            ctx.set_parameters(codec_params).wrap_err_with(|| {
+                format!(
+                    "failed to configure hardware decoder for '{}'",
+                    self.input.display()
+                )
+            })?;
+            ctx.decoder().video().wrap_err_with(|| {
+                format!(
+                    "failed to create hardware video decoder for '{}'",
+                    self.input.display()
+                )
+            })?
         } else {
             warn!("⚠️ Hardware decoder not available, using software decoder");
-            let codec = codec::context::Context::from_parameters(codec_params)?;
-            codec.decoder().video()?
+            let codec =
+                codec::context::Context::from_parameters(codec_params).wrap_err_with(|| {
+                    format!(
+                        "failed to create FFmpeg decoder context for '{}'",
+                        self.input.display()
+                    )
+                })?;
+            codec.decoder().video().wrap_err_with(|| {
+                format!(
+                    "failed to create software video decoder for '{}'",
+                    self.input.display()
+                )
+            })?
         };
         let mut scaler = Scaler::get(
             decoder.format(),
@@ -110,7 +132,15 @@ impl FrameStream {
             1,
             1,
             Flags::BILINEAR,
-        )?;
+        )
+        .wrap_err_with(|| {
+            format!(
+                "failed to create scaler for decoded video {}x{} in '{}'",
+                decoder.width(),
+                decoder.height(),
+                self.input.display()
+            )
+        })?;
         let mut i = 0;
         loop {
             // Drain every pending command before touching the demuxer, so a
@@ -223,7 +253,15 @@ impl FrameStream {
         match cmd {
             PlaybackCommand::TogglePause => self.paused = !self.paused,
             PlaybackCommand::Seek(target_secs) => {
-                input.seek((target_secs * AV_TIME_BASE) as i64, ..)?;
+                input
+                    .seek((target_secs * AV_TIME_BASE) as i64, ..)
+                    .wrap_err_with(|| {
+                        format!(
+                            "failed to seek '{}' to {}s",
+                            self.input.display(),
+                            target_secs
+                        )
+                    })?;
                 decoder.flush();
                 self.frame_buffer_before = frame::Video::empty();
                 self.last_sent_pts = None;
@@ -287,16 +325,26 @@ impl FrameStream {
         // frame, so this needs no reused buffer to clone before sending -
         // the clone (a full pixel-buffer copy) is skipped entirely.
         let mut output_frame = frame::Video::empty();
-        scaler.run(&self.frame_buffer_before, &mut output_frame)?;
+        scaler
+            .run(&self.frame_buffer_before, &mut output_frame)
+            .wrap_err("failed to scale decoded frame to window buffer")?;
         let pts_seconds = self.frame_buffer_before.timestamp().map_or(0.0, ts_calc);
         if self.last_sent_pts.is_some_and(|last| pts_seconds <= last) {
             return Ok(());
         }
         self.last_sent_pts = Some(pts_seconds);
-        self.frame_sync.send(DecodedFrame {
-            frame: output_frame,
-            pts_seconds,
-        })?;
+        self.frame_sync
+            .send(DecodedFrame {
+                frame: output_frame,
+                pts_seconds,
+            })
+            .wrap_err_with(|| {
+                format!(
+                    "failed to enqueue decoded video frame for '{}' at {}s",
+                    self.input.display(),
+                    pts_seconds
+                )
+            })?;
         Ok(())
     }
 }
