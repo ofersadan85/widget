@@ -42,9 +42,8 @@ pub struct App {
     size_sync: Option<mpsc::Sender<PhysicalSize<u32>>>,
     frame_sync: Option<mpsc::Receiver<DecodedFrame>>,
     command_tx: Option<mpsc::Sender<PlaybackCommand>>,
-    frame: ffmpeg_next::frame::Video,
+    video: DecodedFrame,
     file_name: String,
-    current_pts: f64,
     paused: bool,
     transparency: u8,
     show_overlay_text: bool,
@@ -61,15 +60,17 @@ impl App {
             hover: false,
             phase: 0.0,
             position: PhysicalPosition::new(900, 100),
-            size: PhysicalSize::new(400, 300),
+            size: PhysicalSize::new(800, 600),
             fps: Arc::new(AtomicU64::new(30.0f64.to_bits())),
             duration: Arc::new(AtomicF64::new(0.0)),
             size_sync: None,
             frame_sync: None,
             command_tx: None,
-            frame: ffmpeg_next::frame::Video::empty(),
+            video: DecodedFrame {
+                frame: ffmpeg_next::frame::Video::empty(),
+                pts_seconds: 0.0,
+            },
             file_name: String::new(),
-            current_pts: 0.0,
             paused: false,
             transparency: 128, // Default to 50% transparency
             show_overlay_text: true,
@@ -161,27 +162,26 @@ impl App {
         if let Some(frame_rx) = &self.frame_sync
             && let Ok(decoded) = frame_rx.try_recv()
         {
-            self.frame = decoded.frame;
-            self.current_pts = decoded.pts_seconds;
+            self.video = decoded;
         }
 
         // Safety: we initialized ffmpeg (and the frame) properly
-        let frame_matches_size = !unsafe { self.frame.is_empty() }
-            && self.frame.width() == self.size.width
-            && self.frame.height() == self.size.height;
+        let frame_matches_size = !unsafe { self.video.frame.is_empty() }
+            && self.video.frame.width() == self.size.width
+            && self.video.frame.height() == self.size.height;
 
         let bits: &mut [u8] = if frame_matches_size {
             // Fast path: the decoded frame is already the right size, so write the
             // transparency key straight into its own buffer and hand that to GDI
             // directly instead of copying it into bitmap_buffer first.
-            self.frame.data_mut(0)
+            self.video.frame.data_mut(0)
         } else {
             let buffer_size = (self.size.width * self.size.height * 4) as usize;
             self.bitmap_buffer.resize(buffer_size, 0);
 
             // Fill the bitmap buffer with BGRA pixel data.
             // Safety: we initialized ffmpeg properly
-            if unsafe { self.frame.is_empty() } {
+            if unsafe { self.video.frame.is_empty() } {
                 draw_gradient(
                     &mut self.bitmap_buffer,
                     self.size,
@@ -191,24 +191,24 @@ impl App {
             } else {
                 trace!(
                     "Frame size mismatch: {}x{} vs window {}x{}",
-                    self.frame.width(),
-                    self.frame.height(),
+                    self.video.frame.width(),
+                    self.video.frame.height(),
                     self.size.width,
                     self.size.height
                 );
 
-                let min_height = self.frame.height().min(self.size.height);
-                let min_width = self.frame.width().min(self.size.width);
+                let min_height = self.video.frame.height().min(self.size.height);
+                let min_width = self.video.frame.width().min(self.size.width);
                 for y in 0..min_height {
-                    let src_offset = (y * self.frame.width() * 4) as usize;
+                    let src_offset = (y * self.video.frame.width() * 4) as usize;
                     let dst_offset = (y * self.size.width * 4) as usize;
                     let line_size = (min_width * 4) as usize;
 
-                    if src_offset + line_size <= self.frame.data(0).len()
+                    if src_offset + line_size <= self.video.frame.data(0).len()
                         && dst_offset + line_size <= self.bitmap_buffer.len()
                     {
                         self.bitmap_buffer[dst_offset..dst_offset + line_size].copy_from_slice(
-                            &self.frame.data(0)[src_offset..src_offset + line_size],
+                            &self.video.frame.data(0)[src_offset..src_offset + line_size],
                         );
                     }
                 }
@@ -239,7 +239,7 @@ impl App {
             draw_overlay_text(
                 &hdc_mem,
                 &self.file_name,
-                self.current_pts,
+                self.video.pts_seconds,
                 self.duration.load(Ordering::Relaxed),
                 &mut self.overlay_text_buffer,
             )?;
@@ -383,14 +383,14 @@ impl ApplicationHandler for App {
                             self.show_overlay_text = true; // Show overlay when seeking
                             let duration_secs = self.duration.load(Ordering::Relaxed);
                             let step = 5.0;
-                            let mut target = self.current_pts;
+                            let mut target = self.video.pts_seconds;
                             if key == KeyCode::ArrowLeft {
                                 target -= step;
                             } else {
                                 target += step;
                             }
                             target = target.clamp(0.0, duration_secs.max(0.0));
-                            self.current_pts = target;
+                            self.video.pts_seconds = target;
                             if let Some(frame_rx) = &self.frame_sync {
                                 while frame_rx.try_recv().is_ok() {}
                             }
