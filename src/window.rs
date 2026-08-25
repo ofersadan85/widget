@@ -2,8 +2,8 @@ use crate::{
     colors::BLACK,
     error::Result,
     ff::{DecodedFrame, FrameStream, PlaybackCommand},
-    overlay::OverlayText,
-    state::{AtomicF64, GLOBAL_STATE, custom_wndproc, is_cursor_in_circle, toggle_fullscreen},
+    overlay::{OverlayText, PulsingCircle, is_cursor_in_circle},
+    state::{AtomicF64, GLOBAL_STATE, custom_wndproc, toggle_fullscreen},
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
@@ -24,12 +24,6 @@ use winit::{
 };
 use winsafe::{HWND, WNDPROC, co};
 
-#[derive(Default)]
-struct PulsingCircleState {
-    hover: bool,
-    phase: f32,
-}
-
 /// The main application state and logic.
 pub struct App {
     /// The window handle, which is created in the `resumed` method on first render.
@@ -42,7 +36,7 @@ pub struct App {
     /// The title of the window, which is set when the window is created.
     title: String,
     /// The state of the pulsing circle, will probably be removed later
-    pulse: PulsingCircleState,
+    pulse: PulsingCircle,
     /// The current position of the window on the screen, updated on `Moved` or `Resized` events.
     position: PhysicalPosition<i32>,
     /// The current size of the window, updated on `Resized` events.
@@ -76,7 +70,7 @@ impl App {
             last_frame_time: Instant::now(),
             bitmap_buffer: Vec::new(),
             title: String::from("AmazingWidget"),
-            pulse: PulsingCircleState::default(),
+            pulse: PulsingCircle::default(),
             position: PhysicalPosition::new(900, 100),
             size: PhysicalSize::new(800, 450),
             fps: Arc::new(AtomicF64::new(30.0)),
@@ -248,7 +242,7 @@ impl App {
         hdc_mem.SetDIBits(&bitmap, 0, height as u32, bits, &bmi, co::DIB::RGB_COLORS)?;
         let _bmp_guard = hdc_mem.SelectObject(&*bitmap)?;
 
-        draw_pulsing_circle(self.pulse.phase, self.center(), &hdc_mem)?;
+        self.pulse.draw(&hdc_mem, self.center())?;
         self.overlay_text.draw(
             &hdc_mem,
             &self.file_name,
@@ -468,21 +462,4 @@ fn draw_gradient(bitmap_buffer: &mut [u8], size: PhysicalSize<u32>, phase: f32, 
         "No frame data available, drawing {} gradient",
         bitmap_buffer.len()
     );
-}
-
-fn draw_pulsing_circle(
-    phase: f32,
-    center: PhysicalPosition<f64>,
-    hdc_mem: &winsafe::guard::DeleteDCGuard,
-) -> winsafe::SysResult<()> {
-    let brush = winsafe::HBRUSH::CreateSolidBrush(BLACK)?;
-    let _brush_guard = hdc_mem.SelectObject(&*brush)?;
-    let radius = (60.0 + (phase.sin() * 30.0)) as i32;
-    let ellipse_rect = winsafe::RECT {
-        left: center.x as i32 - radius,
-        top: center.y as i32 - radius,
-        right: center.x as i32 + radius,
-        bottom: center.y as i32 + radius,
-    };
-    hdc_mem.Ellipse(ellipse_rect)
 }

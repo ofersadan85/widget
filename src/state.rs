@@ -1,3 +1,4 @@
+use crate::overlay::hit_test_circle;
 use std::sync::{
     LazyLock, Mutex,
     atomic::{AtomicU64, Ordering},
@@ -130,49 +131,4 @@ pub fn toggle_fullscreen(hwnd: &HWND) -> crate::Result<()> {
         state.is_fullscreen = !state.is_fullscreen;
     }
     Ok(())
-}
-
-pub fn is_cursor_in_circle(
-    center: PhysicalPosition<f64>,
-    phase: f32,
-    cursor_pos: PhysicalPosition<f64>,
-) -> bool {
-    let dx = cursor_pos.x - center.x;
-    let dy = cursor_pos.y - center.y;
-    let radius = 60.0 + (f64::from(phase.sin()) * 30.0);
-    dx * dx + dy * dy < radius * radius
-}
-
-pub fn hit_test_circle(
-    center: PhysicalPosition<f64>,
-    phase: f32,
-    cursor_pos: PhysicalPosition<f64>,
-) -> u16 {
-    if is_cursor_in_circle(center, phase, cursor_pos) {
-        co::HT::TRANSPARENT.raw()
-    } else {
-        co::HT::CAPTION.raw()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hit_test_passthrough_inside_circle() {
-        let center = PhysicalPosition::new(200.0, 150.0);
-        let cursor = PhysicalPosition::new(220.0, 150.0);
-        assert_eq!(
-            hit_test_circle(center, 0.0, cursor),
-            co::HT::TRANSPARENT.raw()
-        );
-    }
-
-    #[test]
-    fn hit_test_draggable_outside_circle() {
-        let center = PhysicalPosition::new(200.0, 150.0);
-        let cursor = PhysicalPosition::new(320.0, 150.0);
-        assert_eq!(hit_test_circle(center, 0.0, cursor), co::HT::CAPTION.raw());
-    }
 }

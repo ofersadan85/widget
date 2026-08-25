@@ -1,5 +1,9 @@
-use crate::{colors::WHITE, error::Result};
+use crate::{
+    colors::{BLACK, WHITE},
+    error::Result,
+};
 use std::fmt::{self, Write};
+use winit::dpi::PhysicalPosition;
 use winsafe::{
     HFONT, SIZE, co,
     guard::{DeleteDCGuard, DeleteObjectGuard},
@@ -9,10 +13,10 @@ use winsafe::{
 pub struct OverlayText {
     /// The buffer used to store the formatted text
     buffer: String,
-    /// Whether to show the overlay text or not
-    pub show: bool,
     /// The font used for the overlay text
     font: DeleteObjectGuard<HFONT>,
+    /// Whether to show the overlay text or not
+    pub show: bool,
 }
 
 impl OverlayText {
@@ -82,6 +86,54 @@ fn format_time(seconds: f64, buffer: &mut String) -> fmt::Result {
     Ok(())
 }
 
+#[derive(Default)]
+pub struct PulsingCircle {
+    pub hover: bool,
+    pub phase: f32,
+}
+
+impl PulsingCircle {
+    pub fn draw(
+        &self,
+        hdc_mem: &winsafe::guard::DeleteDCGuard,
+        center: PhysicalPosition<f64>,
+    ) -> winsafe::SysResult<()> {
+        let brush = winsafe::HBRUSH::CreateSolidBrush(BLACK)?;
+        let _brush_guard = hdc_mem.SelectObject(&*brush)?;
+        let radius = (60.0 + (self.phase.sin() * 30.0)) as i32;
+        let ellipse_rect = winsafe::RECT {
+            left: center.x as i32 - radius,
+            top: center.y as i32 - radius,
+            right: center.x as i32 + radius,
+            bottom: center.y as i32 + radius,
+        };
+        hdc_mem.Ellipse(ellipse_rect)
+    }
+}
+
+pub fn is_cursor_in_circle(
+    center: PhysicalPosition<f64>,
+    phase: f32,
+    cursor_pos: PhysicalPosition<f64>,
+) -> bool {
+    let dx = cursor_pos.x - center.x;
+    let dy = cursor_pos.y - center.y;
+    let radius = 60.0 + (f64::from(phase.sin()) * 30.0);
+    dx * dx + dy * dy < radius * radius
+}
+
+pub fn hit_test_circle(
+    center: PhysicalPosition<f64>,
+    phase: f32,
+    cursor_pos: PhysicalPosition<f64>,
+) -> u16 {
+    if is_cursor_in_circle(center, phase, cursor_pos) {
+        co::HT::TRANSPARENT.raw()
+    } else {
+        co::HT::CAPTION.raw()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,5 +156,22 @@ mod tests {
         buffer.clear();
         format_time(3_600.0, &mut buffer).unwrap();
         assert_eq!(buffer, "01:00:00");
+    }
+
+    #[test]
+    fn hit_test_passthrough_inside_circle() {
+        let center = PhysicalPosition::new(200.0, 150.0);
+        let cursor = PhysicalPosition::new(220.0, 150.0);
+        assert_eq!(
+            hit_test_circle(center, 0.0, cursor),
+            co::HT::TRANSPARENT.raw()
+        );
+    }
+
+    #[test]
+    fn hit_test_draggable_outside_circle() {
+        let center = PhysicalPosition::new(200.0, 150.0);
+        let cursor = PhysicalPosition::new(320.0, 150.0);
+        assert_eq!(hit_test_circle(center, 0.0, cursor), co::HT::CAPTION.raw());
     }
 }
