@@ -67,21 +67,25 @@ impl OverlayText {
         hdc_mem.SetTextColor(WHITE)?;
         hdc_mem.SetBkMode(co::BKMODE::TRANSPARENT)?;
         for (i, line) in self.buffer.lines().enumerate() {
-            hdc_mem.TextOut(8, 22 * (i as i32 + 1) + 8, line)?;
+            let i = i32::try_from(i.cast_signed()).expect("short buffer");
+            let y = 22 * (i + 1) + 8;
+            hdc_mem.TextOut(8, y, line)?;
         }
         Ok(())
     }
 }
 
 fn format_time(seconds: f64, buffer: &mut String) -> fmt::Result {
-    let total_seconds = seconds.max(0.0).round() as i64;
-    let hours = total_seconds / 3_600;
-    let minutes = (total_seconds % 3_600) / 60;
-    let secs = total_seconds % 60;
-    if hours > 0 {
-        write!(buffer, "{hours:02}:{minutes:02}:{secs:02}")?;
+    let mut total_seconds = seconds.max(0.0).round();
+    let hours = (total_seconds / 3_600.0).floor();
+    total_seconds -= hours * 3_600.0;
+    let minutes = (total_seconds / 60.0).floor();
+    total_seconds -= minutes * 60.0;
+    let secs = total_seconds.floor();
+    if hours > 0.0 {
+        write!(buffer, "{hours:02.0}:{minutes:02.0}:{secs:02.0}")?;
     } else {
-        write!(buffer, "{minutes:02}:{secs:02}")?;
+        write!(buffer, "{minutes:02.0}:{secs:02.0}")?;
     }
     Ok(())
 }
@@ -89,10 +93,11 @@ fn format_time(seconds: f64, buffer: &mut String) -> fmt::Result {
 #[derive(Default)]
 pub struct PulsingCircle {
     pub hover: bool,
-    pub phase: f32,
+    pub phase: f64,
 }
 
 impl PulsingCircle {
+    #[expect(clippy::cast_possible_truncation)]
     pub fn draw(
         &self,
         hdc_mem: &winsafe::guard::DeleteDCGuard,
@@ -100,12 +105,12 @@ impl PulsingCircle {
     ) -> winsafe::SysResult<()> {
         let brush = winsafe::HBRUSH::CreateSolidBrush(BLACK)?;
         let _brush_guard = hdc_mem.SelectObject(&*brush)?;
-        let radius = (60.0 + (self.phase.sin() * 30.0)) as i32;
+        let radius = self.phase.sin().mul_add(30.0, 60.0);
         let ellipse_rect = winsafe::RECT {
-            left: center.x as i32 - radius,
-            top: center.y as i32 - radius,
-            right: center.x as i32 + radius,
-            bottom: center.y as i32 + radius,
+            left: (center.x - radius) as i32,
+            top: (center.y - radius) as i32,
+            right: (center.x + radius) as i32,
+            bottom: (center.y + radius) as i32,
         };
         hdc_mem.Ellipse(ellipse_rect)
     }
@@ -113,18 +118,20 @@ impl PulsingCircle {
 
 pub fn is_cursor_in_circle(
     center: PhysicalPosition<f64>,
-    phase: f32,
+    phase: f64,
     cursor_pos: PhysicalPosition<f64>,
 ) -> bool {
     let dx = cursor_pos.x - center.x;
     let dy = cursor_pos.y - center.y;
-    let radius = 60.0 + (f64::from(phase.sin()) * 30.0);
-    dx * dx + dy * dy < radius * radius
+    let radius = phase.sin().mul_add(30.0, 60.0);
+    // Alternative calculation using `mul_add` for potential precision / performance benefits
+    // Equivalent to: dx * dx + dy * dy < radius * radius
+    dy.mul_add(dy, dx * dx) < radius * radius
 }
 
 pub fn hit_test_circle(
     center: PhysicalPosition<f64>,
-    phase: f32,
+    phase: f64,
     cursor_pos: PhysicalPosition<f64>,
 ) -> u16 {
     if is_cursor_in_circle(center, phase, cursor_pos) {

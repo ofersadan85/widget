@@ -230,16 +230,23 @@ impl App {
             pixel[3] = self.transparency;
         }
 
-        let width = self.size.width as i32;
-        let height = self.size.height as i32;
-        let bitmap = hdc_screen.CreateCompatibleBitmap(width, height)?;
+        let width_i32 = self.size.width.cast_signed();
+        let height_i32 = self.size.height.cast_signed();
+        let bitmap = hdc_screen.CreateCompatibleBitmap(width_i32, height_i32)?;
         let mut bmi = winsafe::BITMAPINFO::default();
-        bmi.bmiHeader.biWidth = width;
-        bmi.bmiHeader.biHeight = -height; // Negative for top-down bitmap
+        bmi.bmiHeader.biWidth = width_i32;
+        bmi.bmiHeader.biHeight = -height_i32; // Negative for top-down bitmap
         bmi.bmiHeader.biPlanes = 1;
         bmi.bmiHeader.biBitCount = 32;
         bmi.bmiHeader.biCompression = co::BI::RGB;
-        hdc_mem.SetDIBits(&bitmap, 0, height as u32, bits, &bmi, co::DIB::RGB_COLORS)?;
+        hdc_mem.SetDIBits(
+            &bitmap,
+            0,
+            self.size.height,
+            bits,
+            &bmi,
+            co::DIB::RGB_COLORS,
+        )?;
         let _bmp_guard = hdc_mem.SelectObject(&*bitmap)?;
 
         self.pulse.draw(&hdc_mem, self.center())?;
@@ -253,7 +260,7 @@ impl App {
         // Blit to screen
         hdc_screen.BitBlt(
             winsafe::POINT::new(),
-            winsafe::SIZE::with(width, height),
+            winsafe::SIZE::with(width_i32, height_i32),
             &hdc_mem,
             winsafe::POINT::new(),
             co::ROP::SRCCOPY,
@@ -371,12 +378,7 @@ impl ApplicationHandler for App {
         // Set our custom window procedure
         // Safety: the function we are casting has a valid signature for a window procedure,
         // and we are ensuring that the original window procedure is stored and called correctly.
-        unsafe {
-            hwnd.SetWindowLongPtr(
-                co::GWLP::WNDPROC,
-                custom_wndproc as *const () as usize as isize,
-            )
-        };
+        unsafe { hwnd.SetWindowLongPtr(co::GWLP::WNDPROC, custom_wndproc as *const () as isize) };
         // Send the initial window size to the FFmpeg thread if the channel is available
         if let Some(size_tx) = &self.size_sync {
             let _ = size_tx.send(self.size);
@@ -451,14 +453,30 @@ impl ApplicationHandler for App {
     }
 }
 
-fn draw_gradient(bitmap_buffer: &mut [u8], size: PhysicalSize<u32>, phase: f32, transparency: u8) {
-    let red = ((phase % 1.0) * 255.0) as u8;
+trait ModToU8 {
+    fn mod_to_u8(&self) -> u8;
+}
+
+impl ModToU8 for f64 {
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn mod_to_u8(&self) -> u8 {
+        (self % 255.0) as u8
+    }
+}
+
+impl ModToU8 for u32 {
+    fn mod_to_u8(&self) -> u8 {
+        (self % 255) as u8
+    }
+}
+
+fn draw_gradient(bitmap_buffer: &mut [u8], size: PhysicalSize<u32>, phase: f64, transparency: u8) {
     for y in 0..size.height {
         for x in 0..size.width {
             let i = ((y * size.width + x) * 4) as usize;
-            bitmap_buffer[i] = (x % 255) as u8;
-            bitmap_buffer[i + 1] = (y % 255) as u8;
-            bitmap_buffer[i + 2] = red;
+            bitmap_buffer[i] = x.mod_to_u8();
+            bitmap_buffer[i + 1] = y.mod_to_u8();
+            bitmap_buffer[i + 2] = ((phase % 1.0) * 255.0).mod_to_u8();
             bitmap_buffer[i + 3] = transparency;
         }
     }

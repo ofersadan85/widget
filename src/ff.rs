@@ -73,7 +73,7 @@ impl FrameStream {
         }
     }
 
-    #[expect(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines, clippy::cast_precision_loss)]
     pub fn read_frames(&mut self) -> Result<()> {
         let mut input = format::input(&self.input)?;
         let video = input
@@ -210,6 +210,7 @@ impl FrameStream {
         }
     }
 
+    #[expect(clippy::cast_possible_truncation)]
     fn handle_command(
         &mut self,
         cmd: PlaybackCommand,
@@ -252,6 +253,8 @@ impl FrameStream {
         target_secs: f64,
     ) -> Result<()> {
         loop {
+            #[expect(clippy::cast_precision_loss)]
+            let ts_calc = |ts| ts as f64 * f64::from(time_base);
             let next_packet = input
                 .packets()
                 .next()
@@ -260,10 +263,7 @@ impl FrameStream {
                 Some((idx, packet)) if idx == video_index => {
                     decoder.send_packet(&packet)?;
                     if decoder.receive_frame(&mut self.frame_buffer_before).is_ok() {
-                        let pts_seconds = self
-                            .frame_buffer_before
-                            .timestamp()
-                            .map_or(0.0, |ts| ts as f64 * f64::from(time_base));
+                        let pts_seconds = self.frame_buffer_before.timestamp().map_or(0.0, ts_calc);
                         if pts_seconds < target_secs {
                             continue;
                         }
@@ -280,16 +280,15 @@ impl FrameStream {
     /// Scales the most recently decoded frame into a fresh BGRA frame and
     /// sends it, tagged with its presentation timestamp in seconds.
     fn scale_and_send(&mut self, scaler: &mut Scaler, time_base: Rational) -> Result<()> {
+        #[expect(clippy::cast_precision_loss)]
+        let ts_calc = |ts| ts as f64 * f64::from(time_base);
         // Scale into a fresh, uniquely-owned frame and move it into the
         // channel. Scaler::run allocates its output when given an empty
         // frame, so this needs no reused buffer to clone before sending -
         // the clone (a full pixel-buffer copy) is skipped entirely.
         let mut output_frame = frame::Video::empty();
         scaler.run(&self.frame_buffer_before, &mut output_frame)?;
-        let pts_seconds = self
-            .frame_buffer_before
-            .timestamp()
-            .map_or(0.0, |ts| ts as f64 * f64::from(time_base));
+        let pts_seconds = self.frame_buffer_before.timestamp().map_or(0.0, ts_calc);
         if self.last_sent_pts.is_some_and(|last| pts_seconds <= last) {
             return Ok(());
         }

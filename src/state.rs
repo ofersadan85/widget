@@ -8,7 +8,7 @@ use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winsafe::{GetSystemMetrics, HWND, HwndPlace, POINT, SIZE, co};
 
 pub struct GlobalState {
-    pub phase: f32,
+    pub phase: f64,
     pub is_fullscreen: bool,
     pub old_position: PhysicalPosition<i32>,
     pub old_size: PhysicalSize<u32>,
@@ -29,7 +29,7 @@ pub static GLOBAL_STATE: LazyLock<Mutex<GlobalState>> = LazyLock::new(|| {
 pub struct AtomicF64(AtomicU64);
 
 impl AtomicF64 {
-    pub fn new(value: f64) -> Self {
+    pub const fn new(value: f64) -> Self {
         Self(AtomicU64::new(value.to_bits()))
     }
 
@@ -45,8 +45,10 @@ impl AtomicF64 {
 pub fn custom_wndproc(hwnd: HWND, msg: co::WM, wparam: usize, lparam: isize) -> isize {
     if msg == co::WM::NCHITTEST {
         // Get the cursor position from lparam (screen coordinates)
-        let screen_x = i32::from((lparam & 0xFFFF) as i16);
-        let screen_y = i32::from(((lparam >> 16) & 0xFFFF) as i16);
+        // We can `unwrap_or_default` here because the values for an NCHITTEST message are always
+        // valid as i32, even if the cursor is off-screen.
+        let screen_x = i32::try_from(lparam & 0xFFFF).unwrap_or_default();
+        let screen_y = i32::try_from((lparam >> 16) & 0xFFFF).unwrap_or_default();
 
         // Get window position to convert to window coordinates
         if let Ok(rect) = hwnd.GetWindowRect() {
@@ -62,7 +64,7 @@ pub fn custom_wndproc(hwnd: HWND, msg: co::WM, wparam: usize, lparam: isize) -> 
                 let state = GLOBAL_STATE.lock().unwrap();
                 state.phase
             };
-            return hit_test_circle(center, phase, cursor_pos) as isize;
+            return isize::from(hit_test_circle(center, phase, cursor_pos).cast_signed());
         }
     }
 
@@ -81,12 +83,7 @@ pub fn custom_wndproc(hwnd: HWND, msg: co::WM, wparam: usize, lparam: isize) -> 
         let state = GLOBAL_STATE.lock().unwrap();
         state.old_proc
     };
-
-    if let Some(old_proc) = old_proc {
-        old_proc(hwnd, msg, wparam, lparam)
-    } else {
-        0
-    }
+    old_proc.map_or(0, |old_proc| old_proc(hwnd, msg, wparam, lparam))
 }
 
 pub fn toggle_fullscreen(hwnd: &HWND) -> crate::Result<()> {
@@ -98,15 +95,18 @@ pub fn toggle_fullscreen(hwnd: &HWND) -> crate::Result<()> {
             // Restore to old position and size
             (
                 POINT::with(state.old_position.x, state.old_position.y),
-                SIZE::with(state.old_size.width as i32, state.old_size.height as i32),
+                SIZE::with(
+                    state.old_size.width.cast_signed(),
+                    state.old_size.height.cast_signed(),
+                ),
             )
         } else {
             // Save current position and size before going fullscreen
             let rect = hwnd.GetWindowRect()?;
             state.old_position = PhysicalPosition::new(rect.left, rect.top);
             state.old_size = PhysicalSize::new(
-                (rect.right - rect.left) as u32,
-                (rect.bottom - rect.top) as u32,
+                rect.right.abs_diff(rect.left),
+                rect.bottom.abs_diff(rect.top),
             );
             // Get full screen dimensions (including taskbar)
             (
