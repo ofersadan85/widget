@@ -131,7 +131,7 @@ pub fn hit_test_circle(
     if is_cursor_in_circle(center, phase, cursor_pos) {
         co::HT::TRANSPARENT.raw()
     } else {
-        co::HT::CLIENT.raw()
+        co::HT::CAPTION.raw()
     }
 }
 
@@ -140,10 +140,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hit_test_returns_transparent_inside_circle() {
+    fn hit_test_passthrough_inside_circle() {
         let center = PhysicalPosition::new(200.0, 150.0);
         let cursor = PhysicalPosition::new(220.0, 150.0);
-
         assert_eq!(
             hit_test_circle(center, 0.0, cursor),
             co::HT::TRANSPARENT.raw()
@@ -151,10 +150,9 @@ mod tests {
     }
 
     #[test]
-    fn hit_test_returns_client_outside_circle() {
+    fn hit_test_draggable_outside_circle() {
         let center = PhysicalPosition::new(200.0, 150.0);
         let cursor = PhysicalPosition::new(320.0, 150.0);
-
-        assert_eq!(hit_test_circle(center, 0.0, cursor), co::HT::CLIENT.raw());
+        assert_eq!(hit_test_circle(center, 0.0, cursor), co::HT::CAPTION.raw());
     }
 }
