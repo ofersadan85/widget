@@ -73,8 +73,8 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
             window: None,
             last_frame_time: Instant::now(),
             bitmap_buffer: Vec::new(),
@@ -97,8 +97,8 @@ impl App {
             file_name: String::new(),
             paused: false,
             transparency: 128, // Default to 50% transparency
-            overlay_text: OverlayText::new(),
-        }
+            overlay_text: OverlayText::new()?,
+        })
     }
 
     pub fn new_with_stream(path: impl AsRef<Path>) -> Result<Self> {
@@ -109,7 +109,7 @@ impl App {
         let (command_tx, command_rx) = mpsc::channel();
         let fps = Arc::new(AtomicU64::new(0.0f64.to_bits()));
         let duration = Arc::new(AtomicF64::new(0.0));
-        let mut app = Self::new();
+        let mut app = Self::new()?;
         app.size_sync = Some(size_tx);
         app.frame_sync = Some(frame_rx);
         app.command_tx = Some(command_tx);

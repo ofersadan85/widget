@@ -21,7 +21,7 @@ fn main() -> Result<()> {
     let mut app = if let Some(file) = args.file {
         App::new_with_stream(file)?
     } else {
-        App::new()
+        App::new()?
     };
     app.run()?;
     Ok(())

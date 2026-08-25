@@ -1,6 +1,9 @@
 use crate::{colors::WHITE, error::Result};
 use std::fmt::{self, Write};
-use winsafe::{HFONT, SIZE, co, guard::DeleteDCGuard};
+use winsafe::{
+    HFONT, SIZE, co,
+    guard::{DeleteDCGuard, DeleteObjectGuard},
+};
 
 /// Represents the overlay text that is drawn on the window
 pub struct OverlayText {
@@ -8,14 +11,32 @@ pub struct OverlayText {
     buffer: String,
     /// Whether to show the overlay text or not
     pub show: bool,
+    /// The font used for the overlay text
+    font: DeleteObjectGuard<HFONT>,
 }
 
 impl OverlayText {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Result<Self> {
+        let font = HFONT::CreateFont(
+            SIZE::with(0, 26),
+            0,
+            0,
+            co::FW::NORMAL,
+            false,
+            false,
+            false,
+            co::CHARSET::ANSI,
+            co::OUT_PRECIS::DEFAULT,
+            co::CLIP::DEFAULT_PRECIS,
+            co::QUALITY::DEFAULT,
+            co::PITCH::DEFAULT,
+            "Segoe UI",
+        )?;
+        Ok(Self {
             buffer: String::new(),
             show: true,
-        }
+            font,
+        })
     }
 
     fn format(&mut self, file_name: &str, current_pts: f64, duration_secs: f64) -> fmt::Result {
@@ -37,22 +58,7 @@ impl OverlayText {
         if file_name.is_empty() || !self.show {
             return Ok(());
         }
-        let font = HFONT::CreateFont(
-            SIZE::with(0, 26),
-            0,
-            0,
-            co::FW::NORMAL,
-            false,
-            false,
-            false,
-            co::CHARSET::ANSI,
-            co::OUT_PRECIS::DEFAULT,
-            co::CLIP::DEFAULT_PRECIS,
-            co::QUALITY::DEFAULT,
-            co::PITCH::DEFAULT,
-            "Segoe UI",
-        )?;
-        let _font_guard = hdc_mem.SelectObject(&*font)?;
+        let _font_guard = hdc_mem.SelectObject(&*self.font)?;
         self.format(file_name, current_pts, duration_secs)?;
         hdc_mem.SetTextColor(WHITE)?;
         hdc_mem.SetBkMode(co::BKMODE::TRANSPARENT)?;
@@ -82,7 +88,7 @@ mod tests {
 
     #[test]
     fn format_text() {
-        let mut overlay_text = OverlayText::new();
+        let mut overlay_text = OverlayText::new().unwrap();
         overlay_text.format("test.mp4", 65.0, 3_900.0).unwrap();
         assert_eq!(overlay_text.buffer, "test.mp4\n01:05 / -01:03:55");
     }
