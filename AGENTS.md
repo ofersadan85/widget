@@ -4,7 +4,7 @@ This file provides guidance to coding agents when working with code in this repo
 
 ## What this is
 
-A Windows-only Rust desktop widget: a transparent, always-on-top, click-through overlay window drawn with raw GDI, optionally playing a video (decoded via ffmpeg) as its background. See `README.md` for the user-facing feature list (transparent/semitransparent window, click-through, draggable, custom GDI drawing, hotkeys).
+A Windows-only Rust desktop widget: a transparent, always-on-top, click-through overlay window drawn with raw GDI, optionally playing a video (decoded via ffmpeg) as its background. The player now includes an on-screen display (file name + `current / -remaining` time), pause/resume, and 5-second seek controls.
 
 ## Commands
 
@@ -25,32 +25,49 @@ Pre-commit hooks (via `prek`, configured in `.pre-commit-config.yaml`) run `carg
 
 The app is split across a fixed-purpose module set; the interesting behavior comes from how they communicate across threads, not from any one file in isolation.
 
-- **`main.rs`** — parses an optional video file path argument (`clap`). If given, it creates two channels and a shared FPS handle, then spawns a background thread running `FrameStream::read_frames`:
-  - `size_sync`: unbounded `mpsc::channel<PhysicalSize<u32>>`, window → decoder, notifies the decoder of resizes.
-  - `frame_sync`: **bounded** `mpsc::sync_channel::<frame::Video>(2)`, decoder → window.
-  - `fps`: `Arc<AtomicU64>` storing an `f64` (as `to_bits()`/`from_bits()`), decoder → window, communicates the real video frame rate.
-  - Without a file, `App::new()` just runs the animated-gradient-only mode.
+- **`main.rs`** — parses an optional video file path argument (`clap`). If given, it constructs `App::new_with_stream(file)` and runs the app with decode-thread channels and shared playback state set up by `window.rs`. Without a file, `App::new()` runs animated-gradient-only mode.
 
-- **`ff.rs` (`FrameStream`)** — runs entirely on the background decode thread. Opens the file with `ffmpeg-next`, prefers the `h264_cuvid` hardware decoder and falls back to software, and scales every decoded frame to `BGRA` via `ffmpeg_next::software::scaling::Context` before sending it to the window. Two things here are load-bearing and easy to regress:
-  - The frame channel **must stay bounded**. `frame_sync.send()` blocking is what paces decoding to real playback speed — with an unbounded channel the decoder races ahead, dumps the whole video into the channel in a couple of seconds, and then exits long before the user can resize the window (the resize channel then has no reader left).
-  - When a new size arrives on `size_sync`, the scaler is rebuilt with the new output dimensions, and the reused output frame buffer (`frame_buffer_after`) **must be reset to `frame::Video::empty()`**. `Scaler::run()` only reallocates its output frame when it's empty; otherwise a stale-sized buffer causes `Error::OutputChanged` and kills the decode thread.
+- **`ff.rs` (`FrameStream`)** — runs entirely on the background decode thread. Opens the file with `ffmpeg-next`, prefers `h264_cuvid` when available, falls back to software decode, and scales frames to `BGRA` before sending to the window.
+  - `PlaybackCommand` (`TogglePause`, `Seek(f64)`) arrives from the window thread over `command_sync`.
+  - Frames are sent as `DecodedFrame { frame, pts_seconds }` so the window receives pixel data and timestamp atomically.
+  - Stream duration is computed from `input.duration()` and published once via shared `duration` (`Arc<AtomicU64>` storing `f64` bits).
+  - Packet consumption is one-packet-per-iteration (`input.packets().next()`) so `input.seek()` can be called safely between reads.
+  - On EOF, decode does not exit immediately; it waits for commands (notably seek), allowing rewind after the end.
+  - The frame channel **must stay bounded** (`sync_channel(2)`) so decoder throughput is back-pressured to rendering cadence.
+  - On resize, scaler output dimensions are rebuilt to match the new window size.
 
-- **`window.rs` (`App`)** — implements winit's `ApplicationHandler`. Owns the actual `Window` (transparent, undecorated, `AlwaysOnTop`, `skip_taskbar`) and does all rendering by hand in `draw_gdi`: pulls the newest available frame off `frame_sync` (non-blocking `try_recv`, so it just keeps the last frame if none is ready), copies its `BGRA` bytes into a DIB section (falling back to an animated diagonal gradient if no video/frame is available), sets per-pixel alpha for transparency, and draws a pulsing black circle at the window center via GDI `Ellipse`. Redraw cadence in `about_to_wait` is paced by `frame_interval()`, which reads the shared `fps` `AtomicU64` (defaults to ~60fps if unset).
-  - Handles keyboard: `Escape` quits, `W/A/S/D` moves the window, `F` toggles fullscreen, `+`/`-` adjust transparency.
-  - On window creation it sets `WS_EX::LAYERED` and `SetLayeredWindowAttributes` with a color-key so pixels matching `colors::BLACK` become click-through, and installs `state::custom_wndproc` as the window procedure.
+- **`window.rs` (`App`)** — implements winit's `ApplicationHandler` and owns the transparent undecorated `AlwaysOnTop` window. In `draw_gdi`, it:
+  - pulls the latest `DecodedFrame` (non-blocking `try_recv`) and keeps the last good frame,
+  - writes frame data (or fallback gradient) into a 32-bit bitmap,
+  - applies global alpha for semitransparency,
+  - draws the pulsing black center circle,
+  - draws playback overlay text via `overlay.rs`,
+  - blits to screen with `BitBlt`.
+  Redraw cadence in `about_to_wait` is paced by `frame_interval()` using shared FPS.
+  - Handles keyboard: `Escape` quit, `W/A/S/D` move, `F` fullscreen, `+`/`-` transparency, `H` overlay toggle, `Space` pause/resume, `Left`/`Right` seek ±5s.
+  - On seek input, pending frame queue entries are drained before issuing the seek command to avoid stale-frame jumps.
+  - On window creation it sets `WS_EX::LAYERED` and `SetLayeredWindowAttributes` with `colors::BLACK` as color-key, then installs `state::custom_wndproc`.
+
+- **`overlay.rs`** — encapsulates OSD state and drawing (`OverlayText`):
+  - owns reusable text buffer and selected font,
+  - formats two lines (file name, `current / -remaining`),
+  - draws top-left with transparent background mode and white text,
+  - exposes `show` toggle (`H` key).
 
 - **`state.rs`** — a mutex-guarded `GLOBAL_STATE` singleton (phase of the pulsing-circle animation, fullscreen toggle state, saved pre-fullscreen position/size, and the original `WNDPROC` pointer) plus `custom_wndproc`, the replacement window procedure. It intercepts `WM_NCHITTEST` to make the window draggable everywhere except inside the pulsing circle (hit-tested against the same phase-driven radius used for drawing, so the click-through hole tracks the animation), and intercepts double-click/`SC_MAXIMIZE` to call `toggle_fullscreen` instead of native maximize. Unhandled messages are forwarded to the saved original proc — the mutex is always dropped before calling into Win32 to avoid deadlocking on reentrant messages.
 
 - **`colors.rs`** — shared color constants (e.g. the `BLACK` color-key used for click-through transparency).
 
-- **`error.rs`** — a single `thiserror`-based `Error`/`Result` used everywhere, wrapping `ffmpeg_next::Error`, `winsafe::co::ERROR`, `winit::error::EventLoopError`, and `mpsc::SendError<frame::Video>`.
+- **`error.rs`** — a single `thiserror`-based `Error`/`Result` used everywhere, wrapping `ffmpeg_next::Error`, `winsafe::co::ERROR`, `winit::error::EventLoopError`, and `mpsc::SendError<DecodedFrame>`.
 
 ### Threading model at a glance
 
 ``` text
-main thread (winit event loop, App)  <--- frame_sync (bounded, 2) --- decode thread (FrameStream)
-                                       --- size_sync (unbounded)   --->
-                                      <--- fps (Arc<AtomicU64>)    ---
+main thread (winit event loop, App)  <--- frame_sync (bounded, 2): DecodedFrame --- decode thread (FrameStream)
+                                       --- size_sync (unbounded)              --->
+                                       --- command_sync (unbounded)           --->
+                                      <--- fps (Arc<AtomicU64>)               ---
+                                      <--- duration (Arc<AtomicU64>)          ---
 ```
 
-The decode thread is the only writer of decoded frames and the only reader of resize events; the main thread is the only writer of resize events and reads frames opportunistically each redraw. Keeping `frame_sync` bounded is what keeps the decode thread alive and responsive for the whole video instead of finishing (and exiting) far ahead of real-time playback.
+The decode thread is the only writer of decoded frames and the only reader of resize + playback commands; the main thread is the only writer of resize + playback commands and reads frames opportunistically each redraw. Keeping `frame_sync` bounded is what keeps decode timing tied to the displayed playback instead of racing ahead.
