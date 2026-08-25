@@ -5,11 +5,7 @@ use ffmpeg_next::{
     util::format::pixel::Pixel,
 };
 use std::path::PathBuf;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-    mpsc,
-};
+use std::sync::{Arc, atomic::Ordering, mpsc};
 use tracing::{debug, info, trace, warn};
 use winit::dpi::PhysicalSize;
 
@@ -34,10 +30,19 @@ pub struct DecodedFrame {
     pub pts_seconds: f64,
 }
 
+impl Default for DecodedFrame {
+    fn default() -> Self {
+        Self {
+            frame: frame::Video::empty(),
+            pts_seconds: 0.0,
+        }
+    }
+}
+
 pub struct FrameStream {
     input: PathBuf,
     paused: bool,
-    fps: Arc<AtomicU64>,
+    fps: Arc<AtomicF64>,
     duration: Arc<AtomicF64>,
     size_sync: mpsc::Receiver<PhysicalSize<u32>>,
     frame_sync: mpsc::SyncSender<DecodedFrame>,
@@ -52,7 +57,7 @@ impl FrameStream {
         size_sync: mpsc::Receiver<PhysicalSize<u32>>,
         frame_sync: mpsc::SyncSender<DecodedFrame>,
         command_sync: mpsc::Receiver<PlaybackCommand>,
-        fps: Arc<AtomicU64>,
+        fps: Arc<AtomicF64>,
         duration: Arc<AtomicF64>,
     ) -> Self {
         Self {
@@ -83,7 +88,7 @@ impl FrameStream {
         } else {
             0.0
         };
-        self.fps.store(fps.to_bits(), Ordering::Relaxed);
+        self.fps.store(fps, Ordering::Relaxed);
         self.duration
             .store(input.duration() as f64 / AV_TIME_BASE, Ordering::Relaxed);
         let codec_params = video.parameters();

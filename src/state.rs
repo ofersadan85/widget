@@ -40,6 +40,7 @@ impl AtomicF64 {
         self.0.store(value.to_bits(), order);
     }
 }
+
 pub fn custom_wndproc(hwnd: HWND, msg: co::WM, wparam: usize, lparam: isize) -> isize {
     if msg == co::WM::NCHITTEST {
         // Get the cursor position from lparam (screen coordinates)

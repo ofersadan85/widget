@@ -8,11 +8,7 @@ use crate::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-        mpsc,
-    },
+    sync::{Arc, atomic::Ordering, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -28,6 +24,7 @@ use winit::{
 };
 use winsafe::{HWND, WNDPROC, co};
 
+#[derive(Default)]
 struct PulsingCircleState {
     hover: bool,
     phase: f32,
@@ -57,7 +54,7 @@ pub struct App {
     /// The channel used to send playback commands to the `FFmpeg` thread.
     command_tx: Option<mpsc::Sender<PlaybackCommand>>,
     /// The current frames per second, might be updated by the `FFmpeg` thread.
-    fps: Arc<AtomicU64>,
+    fps: Arc<AtomicF64>,
     /// The total duration of the video in seconds, might be updated by the `FFmpeg` thread.
     duration: Arc<AtomicF64>,
     /// The current video frame and its presentation timestamp in seconds.
@@ -79,21 +76,15 @@ impl App {
             last_frame_time: Instant::now(),
             bitmap_buffer: Vec::new(),
             title: String::from("AmazingWidget"),
-            pulse: PulsingCircleState {
-                hover: false,
-                phase: 0.0,
-            },
+            pulse: PulsingCircleState::default(),
             position: PhysicalPosition::new(900, 100),
-            size: PhysicalSize::new(800, 600),
-            fps: Arc::new(AtomicU64::new(30.0f64.to_bits())),
-            duration: Arc::new(AtomicF64::new(0.0)),
+            size: PhysicalSize::new(800, 450),
+            fps: Arc::new(AtomicF64::new(30.0)),
+            duration: Arc::default(),
             size_sync: None,
             frame_sync: None,
             command_tx: None,
-            video: DecodedFrame {
-                frame: ffmpeg_next::frame::Video::empty(),
-                pts_seconds: 0.0,
-            },
+            video: DecodedFrame::default(),
             file_name: String::new(),
             paused: false,
             transparency: 128, // Default to 50% transparency
@@ -107,7 +98,7 @@ impl App {
         // pacing decoding to real playback speed instead of racing ahead.
         let (frame_tx, frame_rx) = mpsc::sync_channel(2);
         let (command_tx, command_rx) = mpsc::channel();
-        let fps = Arc::new(AtomicU64::new(0.0f64.to_bits()));
+        let fps = Arc::new(AtomicF64::new(0.0));
         let duration = Arc::new(AtomicF64::new(0.0));
         let mut app = Self::new()?;
         app.size_sync = Some(size_tx);
@@ -151,7 +142,7 @@ impl App {
     }
 
     fn frame_interval(&self) -> Duration {
-        let fps = f64::from_bits(self.fps.load(Ordering::Relaxed));
+        let fps = self.fps.load(Ordering::Relaxed);
         if fps > 0.0 {
             Duration::from_secs_f64(1.0 / fps)
         } else {
