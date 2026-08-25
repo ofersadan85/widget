@@ -266,6 +266,61 @@ impl App {
         )?;
         Ok(())
     }
+
+    fn handle_key_input(&mut self, event_loop: &ActiveEventLoop, key: KeyCode) {
+        if let Some(window) = &self.window {
+            match key {
+                KeyCode::Escape => {
+                    debug!("Escape pressed");
+                    event_loop.exit();
+                }
+                KeyCode::KeyW => self.position.y -= 10,
+                KeyCode::KeyS => self.position.y += 10,
+                KeyCode::KeyA => self.position.x -= 10,
+                KeyCode::KeyD => self.position.x += 10,
+                KeyCode::KeyH => self.overlay_text.show = !self.overlay_text.show,
+                KeyCode::KeyF => toggle_fullscreen(&self.hwnd()).expect("fullscreen"),
+                KeyCode::Space => {
+                    self.paused = !self.paused;
+                    if let Some(command_tx) = &self.command_tx {
+                        let _ = command_tx.send(PlaybackCommand::TogglePause);
+                    }
+                }
+                KeyCode::ArrowLeft | KeyCode::ArrowRight => {
+                    self.overlay_text.show = true; // Show overlay when seeking
+                    let duration_secs = self.duration.load(Ordering::Relaxed);
+                    let step = 5.0;
+                    let mut target = self.video.pts_seconds;
+                    if key == KeyCode::ArrowLeft {
+                        target -= step;
+                    } else {
+                        target += step;
+                    }
+                    target = target.clamp(0.0, duration_secs.max(0.0));
+                    self.video.pts_seconds = target;
+                    if let Some(frame_rx) = &self.frame_sync {
+                        while frame_rx.try_recv().is_ok() {}
+                    }
+                    if let Some(command_tx) = &self.command_tx {
+                        let _ = command_tx.send(PlaybackCommand::Seek(target));
+                    }
+                }
+                KeyCode::Equal | KeyCode::NumpadAdd => {
+                    self.transparency = self.transparency.saturating_add(10);
+                }
+                KeyCode::Minus | KeyCode::NumpadSubtract => {
+                    self.transparency = self.transparency.saturating_sub(10);
+                }
+                _ => {}
+            }
+            if matches!(
+                key,
+                KeyCode::KeyW | KeyCode::KeyS | KeyCode::KeyA | KeyCode::KeyD
+            ) {
+                window.set_outer_position(self.position);
+            }
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -371,63 +426,7 @@ impl ApplicationHandler for App {
                         ..
                     },
                 ..
-            } => {
-                if let Some(window) = &self.window {
-                    let mut movement = PhysicalPosition::new(0, 0);
-                    match key {
-                        KeyCode::Escape => {
-                            debug!("Escape pressed");
-                            event_loop.exit();
-                        }
-                        KeyCode::KeyW => movement.y = -10,
-                        KeyCode::KeyS => movement.y = 10,
-                        KeyCode::KeyA => movement.x = -10,
-                        KeyCode::KeyD => movement.x = 10,
-                        KeyCode::KeyH => self.overlay_text.show = !self.overlay_text.show,
-                        KeyCode::KeyF => toggle_fullscreen(&self.hwnd()).expect("fullscreen"),
-                        KeyCode::Space => {
-                            self.paused = !self.paused;
-                            if let Some(command_tx) = &self.command_tx {
-                                let _ = command_tx.send(PlaybackCommand::TogglePause);
-                            }
-                        }
-                        KeyCode::ArrowLeft | KeyCode::ArrowRight => {
-                            self.overlay_text.show = true; // Show overlay when seeking
-                            let duration_secs = self.duration.load(Ordering::Relaxed);
-                            let step = 5.0;
-                            let mut target = self.video.pts_seconds;
-                            if key == KeyCode::ArrowLeft {
-                                target -= step;
-                            } else {
-                                target += step;
-                            }
-                            target = target.clamp(0.0, duration_secs.max(0.0));
-                            self.video.pts_seconds = target;
-                            if let Some(frame_rx) = &self.frame_sync {
-                                while frame_rx.try_recv().is_ok() {}
-                            }
-                            if let Some(command_tx) = &self.command_tx {
-                                let _ = command_tx.send(PlaybackCommand::Seek(target));
-                            }
-                        }
-                        KeyCode::Equal | KeyCode::NumpadAdd => {
-                            self.transparency = self.transparency.saturating_add(10);
-                        }
-                        KeyCode::Minus | KeyCode::NumpadSubtract => {
-                            self.transparency = self.transparency.saturating_sub(10);
-                        }
-                        _ => {}
-                    }
-
-                    if movement.x != 0 || movement.y != 0 {
-                        self.position = PhysicalPosition::new(
-                            self.position.x + movement.x,
-                            self.position.y + movement.y,
-                        );
-                        window.set_outer_position(self.position);
-                    }
-                }
-            }
+            } => self.handle_key_input(event_loop, key),
             WindowEvent::Moved(position) => {
                 self.position = position;
             }
