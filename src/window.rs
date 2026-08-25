@@ -16,7 +16,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tracing::{debug, error, trace};
+use tracing::{debug, error, trace, warn};
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
@@ -28,26 +28,53 @@ use winit::{
 };
 use winsafe::{HFONT, HWND, SIZE, WNDPROC, co};
 
-pub struct App {
-    window: Option<Window>,
-    last_frame_time: Instant,
-    bitmap_buffer: Vec<u8>,
-    title: String,
+struct PulsingCircleState {
     hover: bool,
     phase: f32,
+}
+
+struct OverlayTextState {
+    buffer: String,
+    show: bool,
+}
+
+/// The main application state and logic.
+pub struct App {
+    /// The window handle, which is created in the `resumed` method on first render.
+    window: Option<Window>,
+    /// The last time a frame was drawn, used to control the frame rate.
+    last_frame_time: Instant,
+    /// The persistent buffer used to store the bitmap data for the current frame.
+    /// Only meant to be used when we have no video frame
+    bitmap_buffer: Vec<u8>,
+    /// The title of the window, which is set when the window is created.
+    title: String,
+    /// The state of the pulsing circle, will probably be removed later
+    pulse: PulsingCircleState,
+    /// The current position of the window on the screen, updated on `Moved` or `Resized` events.
     position: PhysicalPosition<i32>,
+    /// The current size of the window, updated on `Resized` events.
     size: PhysicalSize<u32>,
-    fps: Arc<AtomicU64>,
-    duration: Arc<AtomicF64>,
+    /// The channel used to send the current window size to the `FFmpeg` thread.
     size_sync: Option<mpsc::Sender<PhysicalSize<u32>>>,
+    /// The channel used to receive decoded frames from the `FFmpeg` thread.
     frame_sync: Option<mpsc::Receiver<DecodedFrame>>,
+    /// The channel used to send playback commands to the `FFmpeg` thread.
     command_tx: Option<mpsc::Sender<PlaybackCommand>>,
+    /// The current frames per second, might be updated by the `FFmpeg` thread.
+    fps: Arc<AtomicU64>,
+    /// The total duration of the video in seconds, might be updated by the `FFmpeg` thread.
+    duration: Arc<AtomicF64>,
+    /// The current video frame and its presentation timestamp in seconds.
     video: DecodedFrame,
+    /// The name of the video file being played, used for overlay text.
     file_name: String,
+    /// Whether the video playback is currently paused.
     paused: bool,
+    /// The transparency level of the window, from 0 (fully transparent) to 255 (fully opaque).
     transparency: u8,
-    show_overlay_text: bool,
-    overlay_text_buffer: String,
+    /// The state of the overlay text, including the reusable buffer
+    overlay_text: OverlayTextState,
 }
 
 impl App {
@@ -57,8 +84,10 @@ impl App {
             last_frame_time: Instant::now(),
             bitmap_buffer: Vec::new(),
             title: String::from("AmazingWidget"),
-            hover: false,
-            phase: 0.0,
+            pulse: PulsingCircleState {
+                hover: false,
+                phase: 0.0,
+            },
             position: PhysicalPosition::new(900, 100),
             size: PhysicalSize::new(800, 600),
             fps: Arc::new(AtomicU64::new(30.0f64.to_bits())),
@@ -73,8 +102,10 @@ impl App {
             file_name: String::new(),
             paused: false,
             transparency: 128, // Default to 50% transparency
-            show_overlay_text: true,
-            overlay_text_buffer: String::new(),
+            overlay_text: OverlayTextState {
+                buffer: String::new(),
+                show: true,
+            },
         }
     }
 
@@ -185,7 +216,7 @@ impl App {
                 draw_gradient(
                     &mut self.bitmap_buffer,
                     self.size,
-                    self.phase,
+                    self.pulse.phase,
                     self.transparency,
                 );
             } else {
@@ -234,14 +265,14 @@ impl App {
         hdc_mem.SetDIBits(&bitmap, 0, height as u32, bits, &bmi, co::DIB::RGB_COLORS)?;
         let _bmp_guard = hdc_mem.SelectObject(&*bitmap)?;
 
-        draw_pulsing_circle(self.phase, self.center(), &hdc_mem)?;
-        if !self.file_name.is_empty() && self.show_overlay_text {
+        draw_pulsing_circle(self.pulse.phase, self.center(), &hdc_mem)?;
+        if !self.file_name.is_empty() && self.overlay_text.show {
             draw_overlay_text(
                 &hdc_mem,
                 &self.file_name,
                 self.video.pts_seconds,
                 self.duration.load(Ordering::Relaxed),
-                &mut self.overlay_text_buffer,
+                &mut self.overlay_text.buffer,
             )?;
         }
 
@@ -260,7 +291,8 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
-            return; // Window already created
+            warn!("Window already created, ignoring resumed event");
+            return;
         }
 
         let window = event_loop.create_window(
@@ -336,18 +368,18 @@ impl ApplicationHandler for App {
                 // circle center. The hover state should update whenever the pointer is
                 // anywhere on the transparent window client area, not just inside the
                 // black circle hole.
-                let next_hover = is_cursor_in_circle(self.center(), self.phase, position);
-                if self.hover != next_hover {
+                let next_hover = is_cursor_in_circle(self.center(), self.pulse.phase, position);
+                if self.pulse.hover != next_hover {
                     debug!("Cursor hovered circle: {next_hover} at {:?}", position);
                 }
-                self.hover = next_hover;
+                self.pulse.hover = next_hover;
             }
             WindowEvent::MouseInput {
                 state: element_state,
                 button: MouseButton::Left,
                 ..
             } => {
-                if element_state == ElementState::Pressed && self.hover {
+                if element_state == ElementState::Pressed && self.pulse.hover {
                     debug!("Circle clicked!");
                 }
             }
@@ -371,7 +403,7 @@ impl ApplicationHandler for App {
                         KeyCode::KeyS => movement.y = 10,
                         KeyCode::KeyA => movement.x = -10,
                         KeyCode::KeyD => movement.x = 10,
-                        KeyCode::KeyH => self.show_overlay_text = !self.show_overlay_text,
+                        KeyCode::KeyH => self.overlay_text.show = !self.overlay_text.show,
                         KeyCode::KeyF => toggle_fullscreen(&self.hwnd()).expect("fullscreen"),
                         KeyCode::Space => {
                             self.paused = !self.paused;
@@ -380,7 +412,7 @@ impl ApplicationHandler for App {
                             }
                         }
                         KeyCode::ArrowLeft | KeyCode::ArrowRight => {
-                            self.show_overlay_text = true; // Show overlay when seeking
+                            self.overlay_text.show = true; // Show overlay when seeking
                             let duration_secs = self.duration.load(Ordering::Relaxed);
                             let step = 5.0;
                             let mut target = self.video.pts_seconds;
@@ -433,8 +465,8 @@ impl ApplicationHandler for App {
         let now = Instant::now();
         if now.duration_since(self.last_frame_time) >= self.frame_interval() {
             self.last_frame_time = now;
-            self.phase += 0.05;
-            GLOBAL_STATE.lock().unwrap().phase = self.phase; // TODO: This shouldn't be two copies
+            self.pulse.phase += 0.05;
+            GLOBAL_STATE.lock().unwrap().phase = self.pulse.phase; // TODO: This shouldn't be two copies
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
