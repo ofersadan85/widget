@@ -7,7 +7,9 @@ pub enum Error {
     #[error(transparent)]
     EventLoop(#[from] winit::error::EventLoopError),
     #[error(transparent)]
-    SyncSend(#[from] std::sync::mpsc::SendError<ffmpeg_next::frame::Video>),
+    SyncFrameSend(#[from] std::sync::mpsc::SendError<crate::ff::DecodedFrame>),
+    #[error(transparent)]
+    Fmt(#[from] std::fmt::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

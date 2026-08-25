@@ -1,11 +1,12 @@
 use crate::{
-    colors::BLACK,
+    colors::{BLACK, WHITE},
     error::Result,
-    ff::FrameStream,
-    state::{GLOBAL_STATE, custom_wndproc, is_cursor_in_circle, toggle_fullscreen},
+    ff::{DecodedFrame, FrameStream, PlaybackCommand},
+    state::{AtomicF64, GLOBAL_STATE, custom_wndproc, is_cursor_in_circle, toggle_fullscreen},
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
+    fmt::{self, Write},
     path::Path,
     sync::{
         Arc,
@@ -25,7 +26,7 @@ use winit::{
     platform::windows::WindowAttributesExtWindows,
     window::{Window, WindowAttributes, WindowId, WindowLevel},
 };
-use winsafe::{HWND, WNDPROC, co};
+use winsafe::{HFONT, HWND, SIZE, WNDPROC, co};
 
 pub struct App {
     window: Option<Window>,
@@ -37,10 +38,17 @@ pub struct App {
     position: PhysicalPosition<i32>,
     size: PhysicalSize<u32>,
     fps: Arc<AtomicU64>,
+    duration: Arc<AtomicF64>,
     size_sync: Option<mpsc::Sender<PhysicalSize<u32>>>,
-    frame_sync: Option<mpsc::Receiver<ffmpeg_next::frame::Video>>,
+    frame_sync: Option<mpsc::Receiver<DecodedFrame>>,
+    command_tx: Option<mpsc::Sender<PlaybackCommand>>,
     frame: ffmpeg_next::frame::Video,
+    file_name: String,
+    current_pts: f64,
+    paused: bool,
     transparency: u8,
+    show_overlay_text: bool,
+    overlay_text_buffer: String,
 }
 
 impl App {
@@ -55,10 +63,17 @@ impl App {
             position: PhysicalPosition::new(900, 100),
             size: PhysicalSize::new(400, 300),
             fps: Arc::new(AtomicU64::new(30.0f64.to_bits())),
+            duration: Arc::new(AtomicF64::new(0.0)),
             size_sync: None,
             frame_sync: None,
+            command_tx: None,
             frame: ffmpeg_next::frame::Video::empty(),
+            file_name: String::new(),
+            current_pts: 0.0,
+            paused: false,
             transparency: 128, // Default to 50% transparency
+            show_overlay_text: true,
+            overlay_text_buffer: String::new(),
         }
     }
 
@@ -67,12 +82,28 @@ impl App {
         // Bounded so the decoder blocks until the window consumes a frame,
         // pacing decoding to real playback speed instead of racing ahead.
         let (frame_tx, frame_rx) = mpsc::sync_channel(2);
+        let (command_tx, command_rx) = mpsc::channel();
         let fps = Arc::new(AtomicU64::new(0.0f64.to_bits()));
+        let duration = Arc::new(AtomicF64::new(0.0));
         let mut app = Self::new();
         app.size_sync = Some(size_tx);
         app.frame_sync = Some(frame_rx);
+        app.command_tx = Some(command_tx);
         app.fps = fps.clone();
-        let mut stream = FrameStream::new(path.as_ref().into(), size_rx, frame_tx, fps);
+        app.duration = duration.clone();
+        app.file_name = path
+            .as_ref()
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut stream = FrameStream::new(
+            path.as_ref().into(),
+            size_rx,
+            frame_tx,
+            command_rx,
+            fps,
+            duration,
+        );
         ffmpeg_next::init()?;
         thread::spawn(move || {
             if let Err(e) = stream.read_frames() {
@@ -128,9 +159,10 @@ impl App {
         );
 
         if let Some(frame_rx) = &self.frame_sync
-            && let Ok(frame) = frame_rx.try_recv()
+            && let Ok(decoded) = frame_rx.try_recv()
         {
-            self.frame = frame;
+            self.frame = decoded.frame;
+            self.current_pts = decoded.pts_seconds;
         }
 
         // Safety: we initialized ffmpeg (and the frame) properly
@@ -203,6 +235,15 @@ impl App {
         let _bmp_guard = hdc_mem.SelectObject(&*bitmap)?;
 
         draw_pulsing_circle(self.phase, self.center(), &hdc_mem)?;
+        if !self.file_name.is_empty() && self.show_overlay_text {
+            draw_overlay_text(
+                &hdc_mem,
+                &self.file_name,
+                self.current_pts,
+                self.duration.load(Ordering::Relaxed),
+                &mut self.overlay_text_buffer,
+            )?;
+        }
 
         // Blit to screen
         hdc_screen.BitBlt(
@@ -278,6 +319,7 @@ impl ApplicationHandler for App {
         debug!("Window created");
     }
 
+    #[allow(clippy::too_many_lines)]
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
@@ -329,7 +371,33 @@ impl ApplicationHandler for App {
                         KeyCode::KeyS => movement.y = 10,
                         KeyCode::KeyA => movement.x = -10,
                         KeyCode::KeyD => movement.x = 10,
+                        KeyCode::KeyH => self.show_overlay_text = !self.show_overlay_text,
                         KeyCode::KeyF => toggle_fullscreen(&self.hwnd()).expect("fullscreen"),
+                        KeyCode::Space => {
+                            self.paused = !self.paused;
+                            if let Some(command_tx) = &self.command_tx {
+                                let _ = command_tx.send(PlaybackCommand::TogglePause);
+                            }
+                        }
+                        KeyCode::ArrowLeft | KeyCode::ArrowRight => {
+                            self.show_overlay_text = true; // Show overlay when seeking
+                            let duration_secs = self.duration.load(Ordering::Relaxed);
+                            let step = 5.0;
+                            let mut target = self.current_pts;
+                            if key == KeyCode::ArrowLeft {
+                                target -= step;
+                            } else {
+                                target += step;
+                            }
+                            target = target.clamp(0.0, duration_secs.max(0.0));
+                            self.current_pts = target;
+                            if let Some(frame_rx) = &self.frame_sync {
+                                while frame_rx.try_recv().is_ok() {}
+                            }
+                            if let Some(command_tx) = &self.command_tx {
+                                let _ = command_tx.send(PlaybackCommand::Seek(target));
+                            }
+                        }
                         KeyCode::Equal | KeyCode::NumpadAdd => {
                             self.transparency = self.transparency.saturating_add(10);
                         }
@@ -374,6 +442,57 @@ impl ApplicationHandler for App {
     }
 }
 
+fn format_time(seconds: f64, buffer: &mut String) -> fmt::Result {
+    buffer.clear();
+    let total_seconds = seconds.max(0.0).round() as i64;
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let secs = total_seconds % 60;
+    if hours > 0 {
+        write!(buffer, "{hours:02}:{minutes:02}:{secs:02}")?;
+    } else {
+        write!(buffer, "{minutes:02}:{secs:02}")?;
+    }
+    Ok(())
+}
+
+fn draw_overlay_text(
+    hdc_mem: &winsafe::guard::DeleteDCGuard,
+    file_name: &str,
+    current_pts: f64,
+    duration_secs: f64,
+    text_buffer: &mut String,
+) -> winsafe::SysResult<()> {
+    let font = HFONT::CreateFont(
+        SIZE::with(0, 26),
+        0,
+        0,
+        co::FW::NORMAL,
+        false,
+        false,
+        false,
+        co::CHARSET::ANSI,
+        co::OUT_PRECIS::DEFAULT,
+        co::CLIP::DEFAULT_PRECIS,
+        co::QUALITY::DEFAULT,
+        co::PITCH::DEFAULT,
+        "Segoe UI",
+    )?;
+    let _font_guard = hdc_mem.SelectObject(&*font)?;
+    hdc_mem.SetTextColor(WHITE)?;
+    hdc_mem.SetBkMode(co::BKMODE::TRANSPARENT)?;
+    let remaining = (duration_secs - current_pts).max(0.0);
+    hdc_mem.TextOut(8, 8, file_name)?;
+    format_time(current_pts, text_buffer).expect("format current_pts");
+    let second_line_y = 8 + 22;
+    hdc_mem.TextOut(8, second_line_y, text_buffer)?;
+    let remaining_offset = 10 * (text_buffer.len() as i32 + 1);
+    format_time(remaining, text_buffer).expect("format remaining");
+    hdc_mem.TextOut(remaining_offset, second_line_y, "/")?;
+    hdc_mem.TextOut(remaining_offset + 16, second_line_y, text_buffer)?;
+    Ok(())
+}
+
 fn draw_gradient(bitmap_buffer: &mut [u8], size: PhysicalSize<u32>, phase: f32, transparency: u8) {
     let red = ((phase % 1.0) * 255.0) as u8;
     for y in 0..size.height {
@@ -406,4 +525,20 @@ fn draw_pulsing_circle(
         bottom: center.y as i32 + radius,
     };
     hdc_mem.Ellipse(ellipse_rect)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_time;
+
+    #[test]
+    fn format_time_uses_mm_ss_and_hh_mm_ss() {
+        let mut buffer = String::new();
+        format_time(0.0, &mut buffer).unwrap();
+        assert_eq!(buffer, "00:00");
+        format_time(65.0, &mut buffer).unwrap();
+        assert_eq!(buffer, "01:05");
+        format_time(3_600.0, &mut buffer).unwrap();
+        assert_eq!(buffer, "01:00:00");
+    }
 }

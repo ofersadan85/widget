@@ -1,4 +1,7 @@
-use std::sync::{LazyLock, Mutex};
+use std::sync::{
+    LazyLock, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 use tracing::debug;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winsafe::{GetSystemMetrics, HWND, HwndPlace, POINT, SIZE, co};
@@ -21,6 +24,22 @@ pub static GLOBAL_STATE: LazyLock<Mutex<GlobalState>> = LazyLock::new(|| {
     })
 });
 
+#[derive(Debug, Default)]
+pub struct AtomicF64(AtomicU64);
+
+impl AtomicF64 {
+    pub fn new(value: f64) -> Self {
+        Self(AtomicU64::new(value.to_bits()))
+    }
+
+    pub fn load(&self, order: Ordering) -> f64 {
+        f64::from_bits(self.0.load(order))
+    }
+
+    pub fn store(&self, value: f64, order: Ordering) {
+        self.0.store(value.to_bits(), order);
+    }
+}
 pub fn custom_wndproc(hwnd: HWND, msg: co::WM, wparam: usize, lparam: isize) -> isize {
     if msg == co::WM::NCHITTEST {
         // Get the cursor position from lparam (screen coordinates)
