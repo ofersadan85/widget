@@ -1,12 +1,12 @@
 use crate::{
-    colors::{BLACK, WHITE},
+    colors::BLACK,
     error::Result,
     ff::{DecodedFrame, FrameStream, PlaybackCommand},
+    overlay::OverlayText,
     state::{AtomicF64, GLOBAL_STATE, custom_wndproc, is_cursor_in_circle, toggle_fullscreen},
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
-    fmt::{self, Write},
     path::Path,
     sync::{
         Arc,
@@ -26,16 +26,11 @@ use winit::{
     platform::windows::WindowAttributesExtWindows,
     window::{Window, WindowAttributes, WindowId, WindowLevel},
 };
-use winsafe::{HFONT, HWND, SIZE, WNDPROC, co};
+use winsafe::{HWND, WNDPROC, co};
 
 struct PulsingCircleState {
     hover: bool,
     phase: f32,
-}
-
-struct OverlayTextState {
-    buffer: String,
-    show: bool,
 }
 
 /// The main application state and logic.
@@ -73,8 +68,8 @@ pub struct App {
     paused: bool,
     /// The transparency level of the window, from 0 (fully transparent) to 255 (fully opaque).
     transparency: u8,
-    /// The state of the overlay text, including the reusable buffer
-    overlay_text: OverlayTextState,
+    /// The overlay text, including the reusable buffer
+    overlay_text: OverlayText,
 }
 
 impl App {
@@ -102,10 +97,7 @@ impl App {
             file_name: String::new(),
             paused: false,
             transparency: 128, // Default to 50% transparency
-            overlay_text: OverlayTextState {
-                buffer: String::new(),
-                show: true,
-            },
+            overlay_text: OverlayText::new(),
         }
     }
 
@@ -266,15 +258,12 @@ impl App {
         let _bmp_guard = hdc_mem.SelectObject(&*bitmap)?;
 
         draw_pulsing_circle(self.pulse.phase, self.center(), &hdc_mem)?;
-        if !self.file_name.is_empty() && self.overlay_text.show {
-            draw_overlay_text(
-                &hdc_mem,
-                &self.file_name,
-                self.video.pts_seconds,
-                self.duration.load(Ordering::Relaxed),
-                &mut self.overlay_text.buffer,
-            )?;
-        }
+        self.overlay_text.draw(
+            &hdc_mem,
+            &self.file_name,
+            self.video.pts_seconds,
+            self.duration.load(Ordering::Relaxed),
+        )?;
 
         // Blit to screen
         hdc_screen.BitBlt(
@@ -474,57 +463,6 @@ impl ApplicationHandler for App {
     }
 }
 
-fn format_time(seconds: f64, buffer: &mut String) -> fmt::Result {
-    buffer.clear();
-    let total_seconds = seconds.max(0.0).round() as i64;
-    let hours = total_seconds / 3_600;
-    let minutes = (total_seconds % 3_600) / 60;
-    let secs = total_seconds % 60;
-    if hours > 0 {
-        write!(buffer, "{hours:02}:{minutes:02}:{secs:02}")?;
-    } else {
-        write!(buffer, "{minutes:02}:{secs:02}")?;
-    }
-    Ok(())
-}
-
-fn draw_overlay_text(
-    hdc_mem: &winsafe::guard::DeleteDCGuard,
-    file_name: &str,
-    current_pts: f64,
-    duration_secs: f64,
-    text_buffer: &mut String,
-) -> winsafe::SysResult<()> {
-    let font = HFONT::CreateFont(
-        SIZE::with(0, 26),
-        0,
-        0,
-        co::FW::NORMAL,
-        false,
-        false,
-        false,
-        co::CHARSET::ANSI,
-        co::OUT_PRECIS::DEFAULT,
-        co::CLIP::DEFAULT_PRECIS,
-        co::QUALITY::DEFAULT,
-        co::PITCH::DEFAULT,
-        "Segoe UI",
-    )?;
-    let _font_guard = hdc_mem.SelectObject(&*font)?;
-    hdc_mem.SetTextColor(WHITE)?;
-    hdc_mem.SetBkMode(co::BKMODE::TRANSPARENT)?;
-    let remaining = (duration_secs - current_pts).max(0.0);
-    hdc_mem.TextOut(8, 8, file_name)?;
-    format_time(current_pts, text_buffer).expect("format current_pts");
-    let second_line_y = 8 + 22;
-    hdc_mem.TextOut(8, second_line_y, text_buffer)?;
-    let remaining_offset = 10 * (text_buffer.len() as i32 + 1);
-    format_time(remaining, text_buffer).expect("format remaining");
-    hdc_mem.TextOut(remaining_offset, second_line_y, "/")?;
-    hdc_mem.TextOut(remaining_offset + 16, second_line_y, text_buffer)?;
-    Ok(())
-}
-
 fn draw_gradient(bitmap_buffer: &mut [u8], size: PhysicalSize<u32>, phase: f32, transparency: u8) {
     let red = ((phase % 1.0) * 255.0) as u8;
     for y in 0..size.height {
@@ -557,20 +495,4 @@ fn draw_pulsing_circle(
         bottom: center.y as i32 + radius,
     };
     hdc_mem.Ellipse(ellipse_rect)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::format_time;
-
-    #[test]
-    fn format_time_uses_mm_ss_and_hh_mm_ss() {
-        let mut buffer = String::new();
-        format_time(0.0, &mut buffer).unwrap();
-        assert_eq!(buffer, "00:00");
-        format_time(65.0, &mut buffer).unwrap();
-        assert_eq!(buffer, "01:05");
-        format_time(3_600.0, &mut buffer).unwrap();
-        assert_eq!(buffer, "01:00:00");
-    }
 }

@@ -3,6 +3,7 @@ use clap::Parser;
 mod colors;
 mod error;
 mod ff;
+mod overlay;
 mod state;
 mod window;
 
