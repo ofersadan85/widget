@@ -1,15 +1,18 @@
 use crate::{
     colors::BLACK,
     error::Result,
+    ff::FrameStream,
     state::{GLOBAL_STATE, custom_wndproc, is_cursor_in_circle, toggle_fullscreen},
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
+    thread,
     time::{Duration, Instant},
 };
 use tracing::{debug, error, trace};
@@ -17,7 +20,7 @@ use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
     event::{ElementState, KeyEvent, MouseButton, WindowEvent},
-    event_loop::ActiveEventLoop,
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     platform::windows::WindowAttributesExtWindows,
     window::{Window, WindowAttributes, WindowId, WindowLevel},
@@ -59,16 +62,30 @@ impl App {
         }
     }
 
-    pub fn new_with_stream(
-        size_sync: mpsc::Sender<PhysicalSize<u32>>,
-        frame_sync: mpsc::Receiver<ffmpeg_next::frame::Video>,
-        fps: Arc<AtomicU64>,
-    ) -> Self {
+    pub fn new_with_stream(path: impl AsRef<Path>) -> Result<Self> {
+        let (size_tx, size_rx) = mpsc::channel();
+        // Bounded so the decoder blocks until the window consumes a frame,
+        // pacing decoding to real playback speed instead of racing ahead.
+        let (frame_tx, frame_rx) = mpsc::sync_channel(2);
+        let fps = Arc::new(AtomicU64::new(0.0f64.to_bits()));
         let mut app = Self::new();
-        app.size_sync = Some(size_sync);
-        app.frame_sync = Some(frame_sync);
-        app.fps = fps;
-        app
+        app.size_sync = Some(size_tx);
+        app.frame_sync = Some(frame_rx);
+        app.fps = fps.clone();
+        let mut stream = FrameStream::new(path.as_ref().into(), size_rx, frame_tx, fps);
+        ffmpeg_next::init()?;
+        thread::spawn(move || {
+            if let Err(e) = stream.read_frames() {
+                error!("Error in FFmpeg thread: {e}");
+            }
+        });
+        Ok(app)
+    }
+
+    pub fn run(&mut self) -> Result<()> {
+        let event_loop = EventLoop::new()?;
+        event_loop.set_control_flow(ControlFlow::Poll);
+        event_loop.run_app(self).map_err(Into::into)
     }
 
     pub fn center(&self) -> PhysicalPosition<f64> {
