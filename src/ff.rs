@@ -21,7 +21,6 @@ pub struct FrameStream {
     pub size_sync: mpsc::Receiver<PhysicalSize<u32>>,
     pub frame_sync: mpsc::SyncSender<frame::Video>,
     pub frame_buffer_before: frame::Video,
-    pub frame_buffer_after: frame::Video,
 }
 
 impl FrameStream {
@@ -37,7 +36,6 @@ impl FrameStream {
             size_sync,
             frame_sync,
             frame_buffer_before: frame::Video::empty(),
-            frame_buffer_after: frame::Video::empty(),
         }
     }
 
@@ -93,14 +91,15 @@ impl FrameStream {
                                 new_size.height,
                                 Flags::BILINEAR,
                             )?;
-                            // The old buffer is allocated at the previous output size;
-                            // Scaler::run only reallocates when the frame is empty, so
-                            // without this it errors with OutputChanged on the next run.
-                            self.frame_buffer_after = frame::Video::empty();
                         }
                     }
-                    scaler.run(&self.frame_buffer_before, &mut self.frame_buffer_after)?;
-                    self.frame_sync.send(self.frame_buffer_after.clone())?;
+                    // Scale into a fresh, uniquely-owned frame and move it into the
+                    // channel. Scaler::run allocates its output when given an empty
+                    // frame, so this needs no reused buffer to clone before sending -
+                    // the clone (a full pixel-buffer copy) is skipped entirely.
+                    let mut output_frame = frame::Video::empty();
+                    scaler.run(&self.frame_buffer_before, &mut output_frame)?;
+                    self.frame_sync.send(output_frame)?;
                     trace!("Frame\t{i}");
                     i += 1;
                 }

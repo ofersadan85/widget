@@ -110,55 +110,67 @@ impl App {
             self.position.x, self.position.y, self.size.width, self.size.height,
         );
 
-        let buffer_size = (self.size.width * self.size.height * 4) as usize;
-        self.bitmap_buffer.resize(buffer_size, 0);
-
         if let Some(frame_rx) = &self.frame_sync
             && let Ok(frame) = frame_rx.try_recv()
         {
             self.frame = frame;
         }
-        // Fill the bitmap buffer with BGRA pixel data.
-        // Safety: we initialized ffmpeg properly
-        if unsafe { self.frame.is_empty() } {
-            draw_gradient(
-                &mut self.bitmap_buffer,
-                self.size,
-                self.phase,
-                self.transparency,
-            );
-        } else if self.frame.width() == self.size.width && self.frame.height() == self.size.height {
-            let copy_size = buffer_size.min(self.frame.data(0).len());
-            if copy_size > 0 {
-                self.bitmap_buffer[..copy_size].copy_from_slice(&self.frame.data(0)[..copy_size]);
-            }
+
+        // Safety: we initialized ffmpeg (and the frame) properly
+        let frame_matches_size = !unsafe { self.frame.is_empty() }
+            && self.frame.width() == self.size.width
+            && self.frame.height() == self.size.height;
+
+        let bits: &mut [u8] = if frame_matches_size {
+            // Fast path: the decoded frame is already the right size, so write the
+            // transparency key straight into its own buffer and hand that to GDI
+            // directly instead of copying it into bitmap_buffer first.
+            self.frame.data_mut(0)
         } else {
-            trace!(
-                "Frame size mismatch: {}x{} vs window {}x{}",
-                self.frame.width(),
-                self.frame.height(),
-                self.size.width,
-                self.size.height
-            );
+            let buffer_size = (self.size.width * self.size.height * 4) as usize;
+            self.bitmap_buffer.resize(buffer_size, 0);
 
-            let min_height = self.frame.height().min(self.size.height);
-            let min_width = self.frame.width().min(self.size.width);
-            for y in 0..min_height {
-                let src_offset = (y * self.frame.width() * 4) as usize;
-                let dst_offset = (y * self.size.width * 4) as usize;
-                let line_size = (min_width * 4) as usize;
+            // Fill the bitmap buffer with BGRA pixel data.
+            // Safety: we initialized ffmpeg properly
+            if unsafe { self.frame.is_empty() } {
+                draw_gradient(
+                    &mut self.bitmap_buffer,
+                    self.size,
+                    self.phase,
+                    self.transparency,
+                );
+            } else {
+                trace!(
+                    "Frame size mismatch: {}x{} vs window {}x{}",
+                    self.frame.width(),
+                    self.frame.height(),
+                    self.size.width,
+                    self.size.height
+                );
 
-                if src_offset + line_size <= self.frame.data(0).len()
-                    && dst_offset + line_size <= self.bitmap_buffer.len()
-                {
-                    self.bitmap_buffer[dst_offset..dst_offset + line_size]
-                        .copy_from_slice(&self.frame.data(0)[src_offset..src_offset + line_size]);
+                let min_height = self.frame.height().min(self.size.height);
+                let min_width = self.frame.width().min(self.size.width);
+                for y in 0..min_height {
+                    let src_offset = (y * self.frame.width() * 4) as usize;
+                    let dst_offset = (y * self.size.width * 4) as usize;
+                    let line_size = (min_width * 4) as usize;
+
+                    if src_offset + line_size <= self.frame.data(0).len()
+                        && dst_offset + line_size <= self.bitmap_buffer.len()
+                    {
+                        self.bitmap_buffer[dst_offset..dst_offset + line_size].copy_from_slice(
+                            &self.frame.data(0)[src_offset..src_offset + line_size],
+                        );
+                    }
                 }
             }
-        }
 
-        for pixel in self.bitmap_buffer.chunks_mut(4) {
-            pixel[3] = self.transparency; // Set alpha channel for transparency
+            &mut self.bitmap_buffer
+        };
+
+        // Apply transparency to alpha channel
+        for pixel in bits.chunks_mut(4) {
+            pixel[3] = self.transparency;
         }
 
         let width = self.size.width as i32;
@@ -170,14 +182,7 @@ impl App {
         bmi.bmiHeader.biPlanes = 1;
         bmi.bmiHeader.biBitCount = 32;
         bmi.bmiHeader.biCompression = co::BI::RGB;
-        hdc_mem.SetDIBits(
-            &bitmap,
-            0,
-            height as u32,
-            &self.bitmap_buffer,
-            &bmi,
-            co::DIB::RGB_COLORS,
-        )?;
+        hdc_mem.SetDIBits(&bitmap, 0, height as u32, bits, &bmi, co::DIB::RGB_COLORS)?;
         let _bmp_guard = hdc_mem.SelectObject(&*bitmap)?;
 
         draw_pulsing_circle(self.phase, self.center(), &hdc_mem)?;
