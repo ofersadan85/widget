@@ -1,0 +1,42 @@
+# See https://prek.j178.dev/quickstart/ for more information
+exclude: .vscode
+repos:
+  - repo: builtin
+    hooks:
+      - id: trailing-whitespace
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-illegal-windows-names
+      - id: end-of-file-fixer
+      - id: check-json
+      - id: check-toml
+      - id: check-yaml
+      - id: mixed-line-ending
+      - id: check-symlinks
+      - id: destroyed-symlinks
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: check-shebang-scripts-are-executable
+        exclude: \.rs$ # Rust files don't need to be executable and might have #![] attributes at the top
+      - id: check-executables-have-shebangs
+
+  - repo: local
+    hooks:
+      - id: fmt
+        name: cargo fmt
+        description: Run cargo fmt on all files
+        entry: cargo fmt --all -- --color=always
+        language: system
+        pass_filenames: false
+      - id: check
+        name: cargo check
+        description: Run cargo check on all files
+        entry: cargo check --all --color=always
+        language: system
+        pass_filenames: false
+      - id: clippy
+        name: cargo clippy
+        description: Run cargo clippy on all files
+        entry: cargo clippy --all --color=always -- -D warnings
+        language: system
+        pass_filenames: false
