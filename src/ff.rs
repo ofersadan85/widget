@@ -5,7 +5,11 @@ use ffmpeg_next::{
     util::format::pixel::Pixel,
 };
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+    mpsc,
+};
 use tracing::{debug, info, trace, warn};
 use winit::dpi::PhysicalSize;
 
@@ -13,9 +17,9 @@ use crate::error::Result;
 
 pub struct FrameStream {
     pub input: PathBuf,
-    pub fps: i32,
+    pub fps: Arc<AtomicU64>,
     pub size_sync: mpsc::Receiver<PhysicalSize<u32>>,
-    pub frame_sync: mpsc::Sender<frame::Video>,
+    pub frame_sync: mpsc::SyncSender<frame::Video>,
     pub frame_buffer_before: frame::Video,
     pub frame_buffer_after: frame::Video,
 }
@@ -24,11 +28,12 @@ impl FrameStream {
     pub fn new(
         input: PathBuf,
         size_sync: mpsc::Receiver<PhysicalSize<u32>>,
-        frame_sync: mpsc::Sender<frame::Video>,
+        frame_sync: mpsc::SyncSender<frame::Video>,
+        fps: Arc<AtomicU64>,
     ) -> Self {
         Self {
             input,
-            fps: 0,
+            fps,
             size_sync,
             frame_sync,
             frame_buffer_before: frame::Video::empty(),
@@ -43,7 +48,13 @@ impl FrameStream {
             .best(media::Type::Video)
             .ok_or(ffmpeg::Error::StreamNotFound)?;
         let video_index = video.index();
-        self.fps = video.avg_frame_rate().0;
+        let frame_rate = video.avg_frame_rate();
+        let fps = if frame_rate.1 != 0 {
+            f64::from(frame_rate.0) / f64::from(frame_rate.1)
+        } else {
+            0.0
+        };
+        self.fps.store(fps.to_bits(), Ordering::Relaxed);
         let codec_params = video.parameters();
         let mut decoder = if let Some(hw_codec) = codec::decoder::find_by_name("h264_cuvid") {
             info!("✅ Using CUDA hardware decoder: h264_cuvid");
@@ -82,6 +93,10 @@ impl FrameStream {
                                 new_size.height,
                                 Flags::BILINEAR,
                             )?;
+                            // The old buffer is allocated at the previous output size;
+                            // Scaler::run only reallocates when the frame is empty, so
+                            // without this it errors with OutputChanged on the next run.
+                            self.frame_buffer_after = frame::Video::empty();
                         }
                     }
                     scaler.run(&self.frame_buffer_before, &mut self.frame_buffer_after)?;

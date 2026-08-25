@@ -1,5 +1,5 @@
 use clap::Parser;
-use std::sync::mpsc;
+use std::sync::{Arc, atomic::AtomicU64, mpsc};
 use tracing::error;
 use winit::event_loop::{ControlFlow, EventLoop};
 
@@ -25,11 +25,13 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let mut app = if let Some(filename) = args.file {
         let (size_tx, size_rx) = mpsc::channel();
-        let (frame_tx, frame_rx) = mpsc::channel();
-        let app = App::new_with_stream(size_tx, frame_rx);
-        let mut stream = FrameStream::new(filename, size_rx, frame_tx);
+        // Bounded so the decoder blocks until the window consumes a frame,
+        // pacing decoding to real playback speed instead of racing ahead.
+        let (frame_tx, frame_rx) = mpsc::sync_channel(2);
+        let fps = Arc::new(AtomicU64::new(0.0f64.to_bits()));
+        let app = App::new_with_stream(size_tx, frame_rx, fps.clone());
+        let mut stream = FrameStream::new(filename, size_rx, frame_tx, fps);
         std::thread::spawn(move || {
-            // app.fps = stream.fps; // TODO: Need to somehow sync FPS during read_frames
             if let Err(e) = stream.read_frames() {
                 error!("Error in FFmpeg thread: {e}");
             }

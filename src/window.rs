@@ -5,7 +5,11 @@ use crate::{
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
-    sync::mpsc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 use tracing::{debug, error, trace};
@@ -29,7 +33,7 @@ pub struct App {
     phase: f32,
     position: PhysicalPosition<i32>,
     size: PhysicalSize<u32>,
-    fps: i32,
+    fps: Arc<AtomicU64>,
     size_sync: Option<mpsc::Sender<PhysicalSize<u32>>>,
     frame_sync: Option<mpsc::Receiver<ffmpeg_next::frame::Video>>,
     frame: ffmpeg_next::frame::Video,
@@ -47,7 +51,7 @@ impl App {
             phase: 0.0,
             position: PhysicalPosition::new(900, 100),
             size: PhysicalSize::new(400, 300),
-            fps: 30,
+            fps: Arc::new(AtomicU64::new(30.0f64.to_bits())),
             size_sync: None,
             frame_sync: None,
             frame: ffmpeg_next::frame::Video::empty(),
@@ -58,10 +62,12 @@ impl App {
     pub fn new_with_stream(
         size_sync: mpsc::Sender<PhysicalSize<u32>>,
         frame_sync: mpsc::Receiver<ffmpeg_next::frame::Video>,
+        fps: Arc<AtomicU64>,
     ) -> Self {
         let mut app = Self::new();
         app.size_sync = Some(size_sync);
         app.frame_sync = Some(frame_sync);
+        app.fps = fps;
         app
     }
 
@@ -73,8 +79,9 @@ impl App {
     }
 
     fn frame_interval(&self) -> Duration {
-        if self.fps > 0 {
-            Duration::from_secs_f64(1.0 / f64::from(self.fps))
+        let fps = f64::from_bits(self.fps.load(Ordering::Relaxed));
+        if fps > 0.0 {
+            Duration::from_secs_f64(1.0 / fps)
         } else {
             Duration::from_millis(16) // Default to ~60 FPS if fps is not set
         }
