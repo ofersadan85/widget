@@ -1,5 +1,5 @@
 use crate::{
-    colors::{BLACK, BLUE, GREEN},
+    colors::BLACK,
     error::Result,
     state::{GLOBAL_STATE, custom_wndproc, is_cursor_in_circle, toggle_fullscreen},
 };
@@ -173,7 +173,7 @@ impl App {
         )?;
         let _bmp_guard = hdc_mem.SelectObject(&*bitmap)?;
 
-        draw_pulsing_circle(self.hover, self.phase, self.center(), &hdc_mem)?;
+        draw_pulsing_circle(self.phase, self.center(), &hdc_mem)?;
 
         // Blit to screen
         hdc_screen.BitBlt(
@@ -215,6 +215,18 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         let hwnd = self.hwnd();
 
+        // A layered window must opt into both the color-key transparency and the
+        // transparent hit-test behavior. Otherwise the OS still treats the top-level
+        // overlay as receiving mouse input even when the underlying pixels are black.
+        // WS_EX::LAYERED makes the black pixels transparent to clicks
+        // WS_EX::LAYERED | WS_EX::TRANSPARENT makes the entire window transparent to clicks
+        hwnd.set_style_ex(hwnd.style_ex() | co::WS_EX::LAYERED);
+        if let Err(err) =
+            hwnd.SetLayeredWindowAttributes(BLACK, self.transparency, co::LWA::COLORKEY)
+        {
+            error!("SetLayeredWindowAttributes failed: {err}");
+        }
+
         // Store the original window procedure
         let old_proc = hwnd.GetWindowLongPtr(co::GWLP::WNDPROC);
         // Safety: This is known to be a valid WNDPROC pointer,
@@ -249,8 +261,15 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                // position is window-relative, so we can use it directly for hover detection
-                self.hover = is_cursor_in_circle(self.center(), self.phase, position);
+                // Position is window-relative, so it can be compared directly with the
+                // circle center. The hover state should update whenever the pointer is
+                // anywhere on the transparent window client area, not just inside the
+                // black circle hole.
+                let next_hover = is_cursor_in_circle(self.center(), self.phase, position);
+                if self.hover != next_hover {
+                    debug!("Cursor hovered circle: {next_hover} at {:?}", position);
+                }
+                self.hover = next_hover;
             }
             WindowEvent::MouseInput {
                 state: element_state,
@@ -318,7 +337,7 @@ impl ApplicationHandler for App {
         if now.duration_since(self.last_frame_time) >= self.frame_interval() {
             self.last_frame_time = now;
             self.phase += 0.05;
-            GLOBAL_STATE.lock().unwrap().phase = self.phase;
+            GLOBAL_STATE.lock().unwrap().phase = self.phase; // TODO: This shouldn't be two copies
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
@@ -344,14 +363,10 @@ fn draw_gradient(bitmap_buffer: &mut [u8], size: PhysicalSize<u32>, phase: f32, 
 }
 
 fn draw_pulsing_circle(
-    hover: bool,
     phase: f32,
     center: PhysicalPosition<f64>,
     hdc_mem: &winsafe::guard::DeleteDCGuard,
 ) -> winsafe::SysResult<()> {
-    let pen_color = if hover { GREEN } else { BLUE };
-    let hpen = winsafe::HPEN::CreatePen(co::PS::SOLID, 3, pen_color)?;
-    let _pen_guard = hdc_mem.SelectObject(&*hpen)?;
     let brush = winsafe::HBRUSH::CreateSolidBrush(BLACK)?;
     let _brush_guard = hdc_mem.SelectObject(&*brush)?;
     let radius = (60.0 + (phase.sin() * 30.0)) as i32;

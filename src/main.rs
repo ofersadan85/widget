@@ -1,7 +1,7 @@
+use clap::Parser;
 use std::sync::mpsc;
 use tracing::error;
 use winit::event_loop::{ControlFlow, EventLoop};
-use clap::Parser;
 
 mod colors;
 mod error;

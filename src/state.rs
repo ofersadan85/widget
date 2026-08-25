@@ -29,12 +29,10 @@ pub fn custom_wndproc(hwnd: HWND, msg: co::WM, wparam: usize, lparam: isize) -> 
 
         // Get window position to convert to window coordinates
         if let Ok(rect) = hwnd.GetWindowRect() {
-            let window_x = screen_x - rect.left;
-            let window_y = screen_y - rect.top;
-
-            // Check if the cursor is over the circle
-            let cursor_pos = PhysicalPosition::new(f64::from(window_x), f64::from(window_y));
-            let rect = hwnd.GetWindowRect().unwrap_or_default();
+            let cursor_pos = PhysicalPosition::new(
+                f64::from(screen_x - rect.left),
+                f64::from(screen_y - rect.top),
+            );
             let center = PhysicalPosition {
                 x: f64::from(rect.right - rect.left) / 2.0,
                 y: f64::from(rect.bottom - rect.top) / 2.0,
@@ -43,10 +41,7 @@ pub fn custom_wndproc(hwnd: HWND, msg: co::WM, wparam: usize, lparam: isize) -> 
                 let state = GLOBAL_STATE.lock().unwrap();
                 state.phase
             };
-            if is_cursor_in_circle(center, phase, cursor_pos) {
-                return co::HT::TRANSPARENT.raw() as isize; // Circle is click-through
-            }
-            return co::HT::CAPTION.raw() as isize; // Background is draggable
+            return hit_test_circle(center, phase, cursor_pos) as isize;
         }
     }
 
@@ -126,4 +121,40 @@ pub fn is_cursor_in_circle(
     let dy = cursor_pos.y - center.y;
     let radius = 60.0 + (f64::from(phase.sin()) * 30.0);
     dx * dx + dy * dy < radius * radius
+}
+
+pub fn hit_test_circle(
+    center: PhysicalPosition<f64>,
+    phase: f32,
+    cursor_pos: PhysicalPosition<f64>,
+) -> u16 {
+    if is_cursor_in_circle(center, phase, cursor_pos) {
+        co::HT::TRANSPARENT.raw()
+    } else {
+        co::HT::CLIENT.raw()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hit_test_returns_transparent_inside_circle() {
+        let center = PhysicalPosition::new(200.0, 150.0);
+        let cursor = PhysicalPosition::new(220.0, 150.0);
+
+        assert_eq!(
+            hit_test_circle(center, 0.0, cursor),
+            co::HT::TRANSPARENT.raw()
+        );
+    }
+
+    #[test]
+    fn hit_test_returns_client_outside_circle() {
+        let center = PhysicalPosition::new(200.0, 150.0);
+        let cursor = PhysicalPosition::new(320.0, 150.0);
+
+        assert_eq!(hit_test_circle(center, 0.0, cursor), co::HT::CLIENT.raw());
+    }
 }
