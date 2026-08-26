@@ -49,6 +49,7 @@ pub struct FrameStream {
     command_sync: mpsc::Receiver<PlaybackCommand>,
     frame_buffer_before: frame::Video,
     last_sent_pts: Option<f64>,
+    autoclose: bool,
 }
 
 impl FrameStream {
@@ -59,6 +60,7 @@ impl FrameStream {
         command_sync: mpsc::Receiver<PlaybackCommand>,
         fps: Arc<AtomicF64>,
         duration: Arc<AtomicF64>,
+        autoclose: bool,
     ) -> Self {
         Self {
             input,
@@ -70,6 +72,7 @@ impl FrameStream {
             command_sync,
             frame_buffer_before: frame::Video::empty(),
             last_sent_pts: None,
+            autoclose,
         }
     }
 
@@ -205,6 +208,9 @@ impl FrameStream {
                     continue;
                 }
                 None => {
+                    if self.autoclose {
+                        return Ok(());
+                    }
                     // End of stream: wait here for a seek instead of exiting,
                     // so rewinding after playback finishes still works.
                     debug!("End of stream reached, waiting for a seek");

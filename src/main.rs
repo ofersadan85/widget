@@ -13,6 +13,10 @@ use crate::window::App;
 struct Args {
     /// Path to the video file to play
     file: Option<std::path::PathBuf>,
+
+    /// Automatically close the application after the video finishes
+    #[clap(long)]
+    autoclose: bool,
 }
 
 fn main() -> Result<()> {
@@ -20,7 +24,7 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
     let mut app = if let Some(file) = args.file {
-        App::new_with_stream(&file)
+        App::new_with_stream(&file, args.autoclose)
             .wrap_err_with(|| format!("failed to initialize app for video '{}'", file.display()))?
     } else {
         App::new().wrap_err("failed to initialize animation-only app")?

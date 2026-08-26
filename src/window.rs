@@ -9,10 +9,10 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     path::Path,
     sync::{Arc, atomic::Ordering, mpsc},
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
@@ -61,6 +61,7 @@ pub struct App {
     transparency: u8,
     /// The overlay text, including the reusable buffer
     overlay_text: OverlayText,
+    stream_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl App {
@@ -83,10 +84,11 @@ impl App {
             paused: false,
             transparency: 128, // Default to 50% transparency
             overlay_text: OverlayText::new()?,
+            stream_thread: None,
         })
     }
 
-    pub fn new_with_stream(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn new_with_stream(path: impl AsRef<Path>, autoclose: bool) -> Result<Self> {
         let (size_tx, size_rx) = mpsc::channel();
         // Bounded so the decoder blocks until the window consumes a frame,
         // pacing decoding to real playback speed instead of racing ahead.
@@ -112,13 +114,14 @@ impl App {
             command_rx,
             fps,
             duration,
+            autoclose,
         );
         ffmpeg_next::init()?;
-        thread::spawn(move || {
+        app.stream_thread = Some(thread::spawn(move || {
             if let Err(e) = stream.read_frames() {
                 error!("Error in FFmpeg thread: {e}");
             }
-        });
+        }));
         Ok(app)
     }
 
@@ -395,6 +398,14 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
+                if self
+                    .stream_thread
+                    .as_ref()
+                    .is_some_and(JoinHandle::is_finished)
+                {
+                    info!("FFmpeg stream thread finished");
+                    event_loop.exit();
+                }
                 if let Err(err) = self.draw_gdi() {
                     error!("draw_gdi failed: {err}");
                 }
