@@ -1,10 +1,16 @@
-use crate::state::AtomicF64;
+use crate::{audio::AudioOutput, state::AtomicF64};
 use color_eyre::eyre::{Context, Result, eyre};
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::{
-    Rational, codec, format, frame, media,
-    software::scaling::{context::Context as Scaler, flag::Flags},
-    util::format::pixel::Pixel,
+    ChannelLayout, Rational, codec, format, frame, media,
+    software::{
+        resampling::Context as Resampler,
+        scaling::{context::Context as Scaler, flag::Flags},
+    },
+    util::format::{
+        pixel::Pixel,
+        sample::{Sample, Type as SampleType},
+    },
 };
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::Ordering, mpsc};
@@ -14,6 +20,10 @@ use winit::dpi::PhysicalSize;
 /// `FFmpeg`'s internal timestamp unit for APIs that aren't tied to a stream's
 /// own `time_base` (`Input::seek`, `Input::duration`), in ticks per second.
 const AV_TIME_BASE: f64 = 1_000_000.0;
+const OUTPUT_SAMPLE_RATE: u32 = 48_000;
+const OUTPUT_CHANNELS: u16 = 2;
+const OUTPUT_CHANNEL_LAYOUT: ChannelLayout = ChannelLayout::STEREO;
+const OUTPUT_SAMPLE_FORMAT: Sample = Sample::I16(SampleType::Packed);
 
 /// Playback control sent from the window thread to the decode thread.
 #[derive(Debug, Clone, Copy)]
@@ -21,6 +31,8 @@ pub enum PlaybackCommand {
     TogglePause,
     /// Absolute target position, in seconds.
     Seek(f64),
+    /// Player-local output gain in [0.0, 1.0].
+    SetVolume(f32),
 }
 
 /// A decoded, scaled video frame paired with its presentation timestamp (in
@@ -50,6 +62,16 @@ pub struct FrameStream {
     frame_buffer_before: frame::Video,
     last_sent_pts: Option<f64>,
     autoclose: bool,
+    volume: f32,
+}
+
+struct AudioStreamState {
+    stream_index: usize,
+    time_base: Rational,
+    decoder: ffmpeg::decoder::Audio,
+    resampler: Resampler,
+    decoded: frame::Audio,
+    resampled: frame::Audio,
 }
 
 impl FrameStream {
@@ -73,6 +95,7 @@ impl FrameStream {
             frame_buffer_before: frame::Video::empty(),
             last_sent_pts: None,
             autoclose,
+            volume: 1.0,
         }
     }
 
@@ -144,6 +167,29 @@ impl FrameStream {
                 self.input.display()
             )
         })?;
+
+        let mut audio = input
+            .streams()
+            .best(media::Type::Audio)
+            .map(|stream| Self::init_audio_stream(&stream))
+            .transpose()?;
+
+        let audio_output = if audio.is_some() {
+            let out = AudioOutput::new(OUTPUT_SAMPLE_RATE, OUTPUT_CHANNELS)
+                .wrap_err("failed to open Windows waveOut audio output")?;
+            out.set_volume(self.volume);
+            Some(out)
+        } else {
+            None
+        };
+
+        if audio.is_none() {
+            debug!(
+                "No audio stream found in '{}'; running video-only",
+                self.input.display()
+            );
+        }
+
         let mut i = 0;
         loop {
             // Drain every pending command before touching the demuxer, so a
@@ -157,6 +203,8 @@ impl FrameStream {
                     &mut scaler,
                     video_index,
                     time_base,
+                    audio.as_mut(),
+                    audio_output.as_ref(),
                 )?;
             }
             if self.paused {
@@ -169,6 +217,8 @@ impl FrameStream {
                         &mut scaler,
                         video_index,
                         time_base,
+                        audio.as_mut(),
+                        audio_output.as_ref(),
                     )?,
                     Err(_) => return Ok(()), // window closed, sender dropped
                 }
@@ -203,8 +253,13 @@ impl FrameStream {
                 .map(|(stream, packet)| (stream.index(), packet));
             let packet = match next_packet {
                 Some((idx, packet)) if idx == video_index => packet,
-                Some(_) => {
-                    // packet from another stream (e.g. audio)
+                Some((idx, packet)) => {
+                    if let (Some(audio_state), Some(audio_out)) =
+                        (audio.as_mut(), audio_output.as_ref())
+                        && idx == audio_state.stream_index
+                    {
+                        self.decode_audio_packet(audio_state, audio_out, &packet)?;
+                    }
                     continue;
                 }
                 None => {
@@ -225,6 +280,8 @@ impl FrameStream {
                                     &mut scaler,
                                     video_index,
                                     time_base,
+                                    audio.as_mut(),
+                                    audio_output.as_ref(),
                                 )?;
                                 if matches!(cmd, PlaybackCommand::Seek(_)) {
                                     break;
@@ -246,7 +303,7 @@ impl FrameStream {
         }
     }
 
-    #[expect(clippy::cast_possible_truncation)]
+    #[expect(clippy::cast_possible_truncation, clippy::too_many_arguments)]
     fn handle_command(
         &mut self,
         cmd: PlaybackCommand,
@@ -255,9 +312,20 @@ impl FrameStream {
         scaler: &mut Scaler,
         video_index: usize,
         time_base: Rational,
+        audio: Option<&mut AudioStreamState>,
+        audio_output: Option<&AudioOutput>,
     ) -> Result<()> {
         match cmd {
-            PlaybackCommand::TogglePause => self.paused = !self.paused,
+            PlaybackCommand::TogglePause => {
+                self.paused = !self.paused;
+                if let Some(audio_out) = audio_output {
+                    if self.paused {
+                        audio_out.pause()?;
+                    } else {
+                        audio_out.resume()?;
+                    }
+                }
+            }
             PlaybackCommand::Seek(target_secs) => {
                 input
                     .seek((target_secs * AV_TIME_BASE) as i64, ..)
@@ -271,6 +339,15 @@ impl FrameStream {
                 decoder.flush();
                 self.frame_buffer_before = frame::Video::empty();
                 self.last_sent_pts = None;
+                if let Some(audio_state) = audio {
+                    audio_state.decoder.flush();
+                    audio_state.resampler = Self::build_resampler(&audio_state.decoder)?;
+                    audio_state.decoded = frame::Audio::empty();
+                    audio_state.resampled = frame::Audio::empty();
+                }
+                if let Some(audio_out) = audio_output {
+                    audio_out.reset()?;
+                }
                 self.decode_next_frame(
                     input,
                     decoder,
@@ -280,6 +357,84 @@ impl FrameStream {
                     target_secs,
                 )?;
             }
+            PlaybackCommand::SetVolume(volume) => {
+                self.volume = volume.clamp(0.0, 1.0);
+                if let Some(audio_out) = audio_output {
+                    audio_out.set_volume(self.volume);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn init_audio_stream(stream: &format::stream::Stream<'_>) -> Result<AudioStreamState> {
+        let stream_index = stream.index();
+        let time_base = stream.time_base();
+        let codec = codec::context::Context::from_parameters(stream.parameters())
+            .wrap_err("failed to create audio decoder context")?;
+        let decoder = codec
+            .decoder()
+            .audio()
+            .wrap_err("failed to create audio decoder")?;
+        let resampler = Self::build_resampler(&decoder)?;
+        Ok(AudioStreamState {
+            stream_index,
+            time_base,
+            decoder,
+            resampler,
+            decoded: frame::Audio::empty(),
+            resampled: frame::Audio::empty(),
+        })
+    }
+
+    fn build_resampler(decoder: &ffmpeg::decoder::Audio) -> Result<Resampler> {
+        let mut src_layout = decoder.channel_layout();
+        if src_layout.is_empty() {
+            src_layout = ChannelLayout::default(i32::from(decoder.channels()));
+        }
+        Resampler::get(
+            decoder.format(),
+            src_layout,
+            decoder.rate(),
+            OUTPUT_SAMPLE_FORMAT,
+            OUTPUT_CHANNEL_LAYOUT,
+            OUTPUT_SAMPLE_RATE,
+        )
+        .wrap_err("failed to create audio resampler")
+    }
+
+    fn decode_audio_packet(
+        &self,
+        audio: &mut AudioStreamState,
+        audio_output: &AudioOutput,
+        packet: &ffmpeg::Packet,
+    ) -> Result<()> {
+        audio
+            .decoder
+            .send_packet(packet)
+            .wrap_err("failed to send packet to audio decoder")?;
+        while audio.decoder.receive_frame(&mut audio.decoded).is_ok() {
+            audio.resampled = frame::Audio::empty();
+            audio
+                .resampler
+                .run(&audio.decoded, &mut audio.resampled)
+                .wrap_err("failed to resample audio frame")?;
+            if audio.resampled.samples() == 0 {
+                continue;
+            }
+            let raw = audio.resampled.plane::<i16>(0);
+            if raw.is_empty() {
+                continue;
+            }
+            #[expect(clippy::cast_precision_loss)]
+            let ts_calc = |ts| ts as f64 * f64::from(audio.time_base);
+            audio_output.submit(raw).wrap_err_with(|| {
+                format!(
+                    "failed to enqueue audio samples for '{}' at {}s",
+                    self.input.display(),
+                    audio.decoded.timestamp().map_or(0.0, ts_calc),
+                )
+            })?;
         }
         Ok(())
     }

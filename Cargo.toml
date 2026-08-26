@@ -10,9 +10,10 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "chrono"] }
 winit = "0.30.13"
 raw-window-handle = "0.6.2"
-winsafe = { version = "0.0.28", features = ["gdi", "user"] }
+winsafe = { version = "0.0.28", features = ["gdi", "mf", "user"] }
 clap = { version = "4.6.6", features = ["derive"] }
 color-eyre = "0.6.5"
+cpal = "0.18.2"
 
 # [lints.rust]
 # unused_imports = "allow"

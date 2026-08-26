@@ -9,8 +9,10 @@ Windows-only transparent desktop widget written in Rust using raw GDI for drawin
 - Draggable window with pulsing center interaction circle
 - Custom software rendering with GDI + BGRA frame blitting
 - Optional video background playback (`cargo run -- path/to/video.mp4`)
+- Audio playback synchronized with video
 - On-screen display (top-left): file name and `current / -remaining` playback time
 - Playback controls: pause/resume and 5-second seek jumps
+- Player-local numpad volume controls (mute, 10%-100%)
 
 ## Controls
 
@@ -21,8 +23,12 @@ Windows-only transparent desktop widget written in Rust using raw GDI for drawin
 - `H`: show/hide overlay text
 - `Space`: pause/resume video playback
 - `Left` / `Right`: seek backward/forward 5 seconds
+- `Numpad 0`: mute audio (0%)
+- `Numpad 1`-`Numpad 9`: set volume to 10%-90%
+- `Numpad *`: set volume to 100%
 
 ## Notes
 
 - In gradient-only mode (no video file), the overlay text is hidden automatically.
 - During pause, the video frame freezes while the UI redraw loop keeps running.
+- Audio controls are ignored in gradient-only mode.

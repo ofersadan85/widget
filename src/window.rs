@@ -314,6 +314,23 @@ impl App {
                         let _ = command_tx.send(PlaybackCommand::Seek(target));
                     }
                 }
+                KeyCode::Numpad0
+                | KeyCode::Numpad1
+                | KeyCode::Numpad2
+                | KeyCode::Numpad3
+                | KeyCode::Numpad4
+                | KeyCode::Numpad5
+                | KeyCode::Numpad6
+                | KeyCode::Numpad7
+                | KeyCode::Numpad8
+                | KeyCode::Numpad9
+                | KeyCode::NumpadMultiply => {
+                    if let Some(volume) = key_to_volume(key)
+                        && let Some(command_tx) = &self.command_tx
+                    {
+                        let _ = command_tx.send(PlaybackCommand::SetVolume(volume));
+                    }
+                }
                 KeyCode::Equal | KeyCode::NumpadAdd => {
                     self.transparency = self.transparency.saturating_add(10);
                 }
@@ -496,4 +513,21 @@ fn draw_gradient(bitmap_buffer: &mut [u8], size: PhysicalSize<u32>, phase: f64, 
         "No frame data available, drawing {} gradient",
         bitmap_buffer.len()
     );
+}
+
+const fn key_to_volume(key: KeyCode) -> Option<f32> {
+    match key {
+        KeyCode::Numpad0 => Some(0.0),
+        KeyCode::Numpad1 => Some(0.1),
+        KeyCode::Numpad2 => Some(0.2),
+        KeyCode::Numpad3 => Some(0.3),
+        KeyCode::Numpad4 => Some(0.4),
+        KeyCode::Numpad5 => Some(0.5),
+        KeyCode::Numpad6 => Some(0.6),
+        KeyCode::Numpad7 => Some(0.7),
+        KeyCode::Numpad8 => Some(0.8),
+        KeyCode::Numpad9 => Some(0.9),
+        KeyCode::NumpadMultiply => Some(1.0),
+        _ => None,
+    }
 }

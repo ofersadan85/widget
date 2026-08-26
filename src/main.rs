@@ -1,6 +1,7 @@
 use clap::Parser;
 use color_eyre::eyre::{Context, Result};
 
+mod audio;
 mod colors;
 mod ff;
 mod overlay;
