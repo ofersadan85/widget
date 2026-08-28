@@ -4,6 +4,7 @@ use color_eyre::eyre::{Context, Result};
 mod audio;
 mod colors;
 mod ff;
+mod keyboard;
 mod overlay;
 mod state;
 mod window;
