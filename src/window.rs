@@ -1,6 +1,7 @@
 use crate::{
     colors::BLACK,
     ff::{DecodedFrame, FrameStream, PlaybackCommand},
+    keyboard::KeyModifier,
     overlay::{OverlayText, PulsingCircle, is_cursor_in_circle},
     state::{AtomicF64, GLOBAL_STATE, custom_wndproc, toggle_fullscreen},
 };
@@ -61,7 +62,10 @@ pub struct App {
     transparency: u8,
     /// The overlay text, including the reusable buffer
     overlay_text: OverlayText,
+    /// A handle to the stream thread
     stream_thread: Option<thread::JoinHandle<()>>,
+    /// The current state of key modifiers (Ctrl, Shift, Alt).
+    key_modifier: KeyModifier,
 }
 
 impl App {
@@ -85,6 +89,7 @@ impl App {
             transparency: 128, // Default to 50% transparency
             overlay_text: OverlayText::new()?,
             stream_thread: None,
+            key_modifier: KeyModifier::default(),
         })
     }
 
@@ -272,7 +277,7 @@ impl App {
         Ok(())
     }
 
-    fn handle_key_input(&mut self, event_loop: &ActiveEventLoop, key: KeyCode) {
+    fn handle_key_press(&mut self, event_loop: &ActiveEventLoop, key: KeyCode) {
         if let Some(window) = &self.window {
             match key {
                 KeyCode::Escape => {
@@ -298,7 +303,7 @@ impl App {
                 KeyCode::ArrowLeft | KeyCode::ArrowRight => {
                     self.overlay_text.show = true; // Show overlay when seeking
                     let duration_secs = self.duration.load(Ordering::Relaxed);
-                    let step = 5.0;
+                    let step = self.key_modifier.as_step_seconds();
                     let mut target = self.video.pts_seconds;
                     if key == KeyCode::ArrowLeft {
                         target -= step;
@@ -434,11 +439,20 @@ impl ApplicationHandler for App {
                 event:
                     KeyEvent {
                         physical_key: PhysicalKey::Code(key),
-                        state: ElementState::Pressed,
+                        state,
                         ..
                     },
                 ..
-            } => self.handle_key_input(event_loop, key),
+            } => {
+                if let Ok(modifier) = KeyModifier::try_from(key) {
+                    match state {
+                        ElementState::Pressed => self.key_modifier.press(modifier),
+                        ElementState::Released => self.key_modifier.release(modifier),
+                    }
+                } else if matches!(state, ElementState::Pressed) {
+                    self.handle_key_press(event_loop, key);
+                }
+            }
             WindowEvent::Moved(position) => {
                 self.position = position;
             }

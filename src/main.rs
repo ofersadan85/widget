@@ -3,6 +3,7 @@ use color_eyre::eyre::{Context, Result};
 
 mod colors;
 mod ff;
+mod keyboard;
 mod overlay;
 mod state;
 mod window;
