@@ -2,7 +2,7 @@ use crate::overlay::hit_test_circle;
 use color_eyre::eyre::Context;
 use std::sync::{
     LazyLock, Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU32, AtomicU64, Ordering},
 };
 use tracing::debug;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -39,6 +39,23 @@ impl AtomicF64 {
     }
 
     pub fn store(&self, value: f64, order: Ordering) {
+        self.0.store(value.to_bits(), order);
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct AtomicF32(AtomicU32);
+
+impl AtomicF32 {
+    pub const fn new(value: f32) -> Self {
+        Self(AtomicU32::new(value.to_bits()))
+    }
+
+    pub fn load(&self, order: Ordering) -> f32 {
+        f32::from_bits(self.0.load(order))
+    }
+
+    pub fn store(&self, value: f32, order: Ordering) {
         self.0.store(value.to_bits(), order);
     }
 }

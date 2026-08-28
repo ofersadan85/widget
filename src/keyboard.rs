@@ -79,6 +79,42 @@ impl KeyModifier {
     }
 }
 
+/// Represents the audio volume level, ranging from 0.0 (muted) to 1.0 (maximum).
+#[derive(Debug, Clone, Copy)]
+pub struct Volume(f32);
+
+impl Volume {
+    pub fn adjust(&mut self, key: KeyCode) -> Result<(), &'static str> {
+        match key {
+            KeyCode::AudioVolumeUp => self.0 = (self.0 + 0.01).min(1.0),
+            KeyCode::AudioVolumeDown => self.0 = (self.0 - 0.01).max(0.0),
+            KeyCode::Numpad0 | KeyCode::AudioVolumeMute => self.0 = 0.0,
+            KeyCode::Numpad1 => self.0 = 0.1,
+            KeyCode::Numpad2 => self.0 = 0.2,
+            KeyCode::Numpad3 => self.0 = 0.3,
+            KeyCode::Numpad4 => self.0 = 0.4,
+            KeyCode::Numpad5 => self.0 = 0.5,
+            KeyCode::Numpad6 => self.0 = 0.6,
+            KeyCode::Numpad7 => self.0 = 0.7,
+            KeyCode::Numpad8 => self.0 = 0.8,
+            KeyCode::Numpad9 => self.0 = 0.9,
+            KeyCode::NumpadMultiply => self.0 = 1.0,
+            _ => return Err("Unsupported key code for Volume"),
+        }
+        Ok(())
+    }
+
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl Default for Volume {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

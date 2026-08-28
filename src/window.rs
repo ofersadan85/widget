@@ -1,7 +1,7 @@
 use crate::{
     colors::BLACK,
     ff::{DecodedFrame, FrameStream, PlaybackCommand},
-    keyboard::KeyModifier,
+    keyboard::{KeyModifier, Volume},
     overlay::{OverlayText, PulsingCircle, is_cursor_in_circle},
     state::{AtomicF64, GLOBAL_STATE, custom_wndproc, toggle_fullscreen},
 };
@@ -66,6 +66,8 @@ pub struct App {
     stream_thread: Option<thread::JoinHandle<()>>,
     /// The current state of key modifiers (Ctrl, Shift, Alt).
     key_modifier: KeyModifier,
+    /// The current volume level of the video playback, from 0.0 to 1.0.
+    volume: Volume,
 }
 
 impl App {
@@ -90,6 +92,7 @@ impl App {
             overlay_text: OverlayText::new()?,
             stream_thread: None,
             key_modifier: KeyModifier::default(),
+            volume: Volume::default(),
         })
     }
 
@@ -277,7 +280,26 @@ impl App {
         Ok(())
     }
 
-    fn handle_key_press(&mut self, event_loop: &ActiveEventLoop, key: KeyCode) {
+    fn handle_key_press(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        key: KeyCode,
+        state: ElementState,
+    ) {
+        if let Ok(modifier) = KeyModifier::try_from(key) {
+            match state {
+                ElementState::Pressed => self.key_modifier.press(modifier),
+                ElementState::Released => self.key_modifier.release(modifier),
+            }
+        }
+        if matches!(state, ElementState::Released) {
+            return; // Ignore key releases
+        }
+        if self.volume.adjust(key).is_ok()
+            && let Some(command_tx) = &self.command_tx
+        {
+            let _ = command_tx.send(PlaybackCommand::SetVolume(self.volume));
+        }
         if let Some(window) = &self.window {
             match key {
                 KeyCode::Escape => {
@@ -329,11 +351,12 @@ impl App {
                 | KeyCode::Numpad7
                 | KeyCode::Numpad8
                 | KeyCode::Numpad9
-                | KeyCode::NumpadMultiply => {
-                    if let Some(volume) = key_to_volume(key)
-                        && let Some(command_tx) = &self.command_tx
-                    {
-                        let _ = command_tx.send(PlaybackCommand::SetVolume(volume));
+                | KeyCode::NumpadMultiply
+                | KeyCode::AudioVolumeMute
+                | KeyCode::AudioVolumeUp
+                | KeyCode::AudioVolumeDown => {
+                    if let Some(command_tx) = &self.command_tx {
+                        let _ = command_tx.send(PlaybackCommand::SetVolume(self.volume));
                     }
                 }
                 KeyCode::Equal | KeyCode::NumpadAdd => {
@@ -460,16 +483,7 @@ impl ApplicationHandler for App {
                         ..
                     },
                 ..
-            } => {
-                if let Ok(modifier) = KeyModifier::try_from(key) {
-                    match state {
-                        ElementState::Pressed => self.key_modifier.press(modifier),
-                        ElementState::Released => self.key_modifier.release(modifier),
-                    }
-                } else if matches!(state, ElementState::Pressed) {
-                    self.handle_key_press(event_loop, key);
-                }
-            }
+            } => self.handle_key_press(event_loop, key, state),
             WindowEvent::Moved(position) => {
                 self.position = position;
             }
@@ -527,21 +541,4 @@ fn draw_gradient(bitmap_buffer: &mut [u8], size: PhysicalSize<u32>, phase: f64, 
         "No frame data available, drawing {} gradient",
         bitmap_buffer.len()
     );
-}
-
-const fn key_to_volume(key: KeyCode) -> Option<f32> {
-    match key {
-        KeyCode::Numpad0 => Some(0.0),
-        KeyCode::Numpad1 => Some(0.1),
-        KeyCode::Numpad2 => Some(0.2),
-        KeyCode::Numpad3 => Some(0.3),
-        KeyCode::Numpad4 => Some(0.4),
-        KeyCode::Numpad5 => Some(0.5),
-        KeyCode::Numpad6 => Some(0.6),
-        KeyCode::Numpad7 => Some(0.7),
-        KeyCode::Numpad8 => Some(0.8),
-        KeyCode::Numpad9 => Some(0.9),
-        KeyCode::NumpadMultiply => Some(1.0),
-        _ => None,
-    }
 }

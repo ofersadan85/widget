@@ -1,4 +1,4 @@
-use crate::{audio::AudioOutput, state::AtomicF64};
+use crate::{audio::AudioOutput, keyboard::Volume, state::AtomicF64};
 use color_eyre::eyre::{Context, Result, eyre};
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::{
@@ -32,7 +32,7 @@ pub enum PlaybackCommand {
     /// Absolute target position, in seconds.
     Seek(f64),
     /// Player-local output gain in [0.0, 1.0].
-    SetVolume(f32),
+    SetVolume(Volume),
 }
 
 /// A decoded, scaled video frame paired with its presentation timestamp (in
@@ -62,7 +62,7 @@ pub struct FrameStream {
     frame_buffer_before: frame::Video,
     last_sent_pts: Option<f64>,
     autoclose: bool,
-    volume: f32,
+    volume: Volume,
 }
 
 struct AudioStreamState {
@@ -95,7 +95,7 @@ impl FrameStream {
             frame_buffer_before: frame::Video::empty(),
             last_sent_pts: None,
             autoclose,
-            volume: 1.0,
+            volume: Volume::default(),
         }
     }
 
@@ -358,7 +358,7 @@ impl FrameStream {
                 )?;
             }
             PlaybackCommand::SetVolume(volume) => {
-                self.volume = volume.clamp(0.0, 1.0);
+                self.volume = volume;
                 if let Some(audio_out) = audio_output {
                     audio_out.set_volume(self.volume);
                 }

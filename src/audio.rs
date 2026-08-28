@@ -1,3 +1,4 @@
+use crate::{keyboard::Volume, state::AtomicF32};
 use color_eyre::eyre::{Result, eyre};
 use cpal::{
     Device, FromSample, SampleFormat, SizedSample, Stream, StreamConfig,
@@ -5,17 +6,14 @@ use cpal::{
 };
 use std::{
     collections::VecDeque,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU32, Ordering},
-    },
+    sync::{Arc, Mutex, atomic::Ordering},
 };
 
 const TARGET_BUFFER_MS: u32 = 200;
 
 struct SharedAudio {
     queue: Mutex<VecDeque<i16>>,
-    volume_bits: AtomicU32,
+    volume: AtomicF32,
 }
 
 pub struct AudioOutput {
@@ -42,7 +40,7 @@ impl AudioOutput {
 
         let shared = Arc::new(SharedAudio {
             queue: Mutex::new(VecDeque::with_capacity(target_samples)),
-            volume_bits: AtomicU32::new(1.0_f32.to_bits()),
+            volume: AtomicF32::new(1.0),
         });
 
         let error_callback = |err| {
@@ -65,10 +63,9 @@ impl AudioOutput {
         })
     }
 
-    pub fn set_volume(&self, volume: f32) {
-        self.shared
-            .volume_bits
-            .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    pub fn set_volume(&self, volume: Volume) {
+        let volume = volume.get().clamp(0.0, 1.0);
+        self.shared.volume.store(volume, Ordering::Relaxed);
     }
 
     pub fn submit(&self, pcm: &[i16]) -> Result<()> {
@@ -184,7 +181,7 @@ fn render_audio_frame<T>(out: &mut [T], shared: &SharedAudio)
 where
     T: SizedSample + FromSample<f32>,
 {
-    let volume = f32::from_bits(shared.volume_bits.load(Ordering::Relaxed));
+    let volume = shared.volume.load(Ordering::Relaxed);
     if let Ok(mut queue) = shared.queue.lock() {
         for sample in out.iter_mut() {
             let src = queue.pop_front().unwrap_or_default();
