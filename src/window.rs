@@ -3,7 +3,7 @@ use crate::{
     ff::{DecodedFrame, FrameStream, PlaybackCommand},
     keyboard::KeyModifier,
     overlay::{OverlayText, PulsingCircle, is_cursor_in_circle},
-    state::{AtomicF64, GLOBAL_STATE, custom_wndproc, toggle_fullscreen},
+    state::{AtomicF64, GLOBAL_STATE, custom_wndproc},
 };
 use color_eyre::eyre::Result;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -21,7 +21,7 @@ use winit::{
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     platform::windows::WindowAttributesExtWindows,
-    window::{Window, WindowAttributes, WindowId, WindowLevel},
+    window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel},
 };
 use winsafe::{HWND, WNDPROC, co};
 
@@ -34,14 +34,8 @@ pub struct App {
     /// The persistent buffer used to store the bitmap data for the current frame.
     /// Only meant to be used when we have no video frame
     bitmap_buffer: Vec<u8>,
-    /// The title of the window, which is set when the window is created.
-    title: String,
     /// The state of the pulsing circle, will probably be removed later
     pulse: PulsingCircle,
-    /// The current position of the window on the screen, updated on `Moved` or `Resized` events.
-    position: PhysicalPosition<i32>,
-    /// The current size of the window, updated on `Resized` events.
-    size: PhysicalSize<u32>,
     /// The channel used to send the current window size to the `FFmpeg` thread.
     size_sync: Option<mpsc::Sender<PhysicalSize<u32>>>,
     /// The channel used to receive decoded frames from the `FFmpeg` thread.
@@ -56,8 +50,6 @@ pub struct App {
     video: DecodedFrame,
     /// The name of the video file being played, used for overlay text.
     file_name: String,
-    /// Whether the video playback is currently paused.
-    paused: bool,
     /// The transparency level of the window, from 0 (fully transparent) to 255 (fully opaque).
     transparency: u8,
     /// The overlay text, including the reusable buffer
@@ -74,10 +66,7 @@ impl App {
             window: None,
             last_frame_time: Instant::now(),
             bitmap_buffer: Vec::new(),
-            title: String::from("AmazingWidget"),
             pulse: PulsingCircle::default(),
-            position: PhysicalPosition::new(900, 100),
-            size: PhysicalSize::new(800, 450),
             fps: Arc::new(AtomicF64::new(30.0)),
             duration: Arc::default(),
             size_sync: None,
@@ -85,7 +74,6 @@ impl App {
             command_tx: None,
             video: DecodedFrame::default(),
             file_name: String::new(),
-            paused: false,
             transparency: 128, // Default to 50% transparency
             overlay_text: OverlayText::new()?,
             stream_thread: None,
@@ -137,10 +125,25 @@ impl App {
         Ok(())
     }
 
+    pub fn size(&self) -> PhysicalSize<u32> {
+        self.window
+            .as_ref()
+            .expect("tried to access window size before window creation")
+            .inner_size()
+    }
+
+    pub fn position(&self) -> PhysicalPosition<i32> {
+        self.window
+            .as_ref()
+            .expect("tried to access window position before window creation")
+            .outer_position()
+            .expect("tried to access window position on another thread")
+    }
+
     pub fn center(&self) -> PhysicalPosition<f64> {
         PhysicalPosition {
-            x: f64::from(self.size.width) / 2.0,
-            y: f64::from(self.size.height) / 2.0,
+            x: f64::from(self.size().width) / 2.0,
+            y: f64::from(self.size().height) / 2.0,
         }
     }
 
@@ -168,12 +171,29 @@ impl App {
         }
     }
 
+    fn refresh_layered_window_attributes(&self) {
+        // A layered window must opt into both the color-key transparency and the
+        // transparent hit-test behavior. Otherwise the OS still treats the top-level
+        // overlay as receiving mouse input even when the underlying pixels are black.
+        // WS_EX::LAYERED makes the black pixels transparent to clicks
+        // WS_EX::LAYERED | WS_EX::TRANSPARENT makes the entire window transparent to clicks
+        let hwnd = self.hwnd();
+        hwnd.set_style_ex(hwnd.style_ex() | co::WS_EX::LAYERED);
+        if let Err(err) =
+            hwnd.SetLayeredWindowAttributes(BLACK, self.transparency, co::LWA::COLORKEY)
+        {
+            error!("SetLayeredWindowAttributes failed: {err}");
+        }
+    }
+
     fn draw_gdi(&mut self) -> Result<()> {
         let hdc_screen = self.hwnd().GetDC()?;
         let hdc_mem = hdc_screen.CreateCompatibleDC()?;
+        let size = self.size();
+        let position = self.position();
         trace!(
             "Drawing at position ({}, {}), size ({}, {})",
-            self.position.x, self.position.y, self.size.width, self.size.height,
+            position.x, position.y, size.width, size.height,
         );
 
         if let Some(frame_rx) = &self.frame_sync
@@ -184,8 +204,8 @@ impl App {
 
         // Safety: we initialized ffmpeg (and the frame) properly
         let frame_matches_size = !unsafe { self.video.frame.is_empty() }
-            && self.video.frame.width() == self.size.width
-            && self.video.frame.height() == self.size.height;
+            && self.video.frame.width() == size.width
+            && self.video.frame.height() == size.height;
 
         let bits: &mut [u8] = if frame_matches_size {
             // Fast path: the decoded frame is already the right size, so write the
@@ -193,7 +213,7 @@ impl App {
             // directly instead of copying it into bitmap_buffer first.
             self.video.frame.data_mut(0)
         } else {
-            let buffer_size = (self.size.width * self.size.height * 4) as usize;
+            let buffer_size = (size.width * size.height * 4) as usize;
             self.bitmap_buffer.resize(buffer_size, 0);
 
             // Fill the bitmap buffer with BGRA pixel data.
@@ -201,7 +221,7 @@ impl App {
             if unsafe { self.video.frame.is_empty() } {
                 draw_gradient(
                     &mut self.bitmap_buffer,
-                    self.size,
+                    size,
                     self.pulse.phase,
                     self.transparency,
                 );
@@ -210,15 +230,15 @@ impl App {
                     "Frame size mismatch: {}x{} vs window {}x{}",
                     self.video.frame.width(),
                     self.video.frame.height(),
-                    self.size.width,
-                    self.size.height
+                    size.width,
+                    size.height
                 );
 
-                let min_height = self.video.frame.height().min(self.size.height);
-                let min_width = self.video.frame.width().min(self.size.width);
+                let min_height = self.video.frame.height().min(size.height);
+                let min_width = self.video.frame.width().min(size.width);
                 for y in 0..min_height {
                     let src_offset = (y * self.video.frame.width() * 4) as usize;
-                    let dst_offset = (y * self.size.width * 4) as usize;
+                    let dst_offset = (y * size.width * 4) as usize;
                     let line_size = (min_width * 4) as usize;
 
                     if src_offset + line_size <= self.video.frame.data(0).len()
@@ -239,8 +259,8 @@ impl App {
             pixel[3] = self.transparency;
         }
 
-        let width_i32 = self.size.width.cast_signed();
-        let height_i32 = self.size.height.cast_signed();
+        let width_i32 = size.width.cast_signed();
+        let height_i32 = size.height.cast_signed();
         let bitmap = hdc_screen.CreateCompatibleBitmap(width_i32, height_i32)?;
         let mut bmi = winsafe::BITMAPINFO::default();
         bmi.bmiHeader.biWidth = width_i32;
@@ -248,14 +268,7 @@ impl App {
         bmi.bmiHeader.biPlanes = 1;
         bmi.bmiHeader.biBitCount = 32;
         bmi.bmiHeader.biCompression = co::BI::RGB;
-        hdc_mem.SetDIBits(
-            &bitmap,
-            0,
-            self.size.height,
-            bits,
-            &bmi,
-            co::DIB::RGB_COLORS,
-        )?;
+        hdc_mem.SetDIBits(&bitmap, 0, size.height, bits, &bmi, co::DIB::RGB_COLORS)?;
         let _bmp_guard = hdc_mem.SelectObject(&*bitmap)?;
 
         self.pulse.draw(&hdc_mem, self.center())?;
@@ -284,18 +297,38 @@ impl App {
                     debug!("Escape pressed");
                     event_loop.exit();
                 }
-                KeyCode::KeyW => self.position.y -= 10,
-                KeyCode::KeyS => self.position.y += 10,
-                KeyCode::KeyA => self.position.x -= 10,
-                KeyCode::KeyD => self.position.x += 10,
+                KeyCode::KeyW => {
+                    let mut new_pos = self.position();
+                    new_pos.y -= 10;
+                    window.set_outer_position(new_pos);
+                }
+                KeyCode::KeyS => {
+                    let mut new_pos = self.position();
+                    new_pos.y += 10;
+                    window.set_outer_position(new_pos);
+                }
+                KeyCode::KeyA => {
+                    let mut new_pos = self.position();
+                    new_pos.x -= 10;
+                    window.set_outer_position(new_pos);
+                }
+                KeyCode::KeyD => {
+                    let mut new_pos = self.position();
+                    new_pos.x += 10;
+                    window.set_outer_position(new_pos);
+                }
                 KeyCode::KeyH => self.overlay_text.show = !self.overlay_text.show,
                 KeyCode::KeyF => {
-                    if let Err(err) = toggle_fullscreen(&self.hwnd()) {
-                        error!("Failed to toggle fullscreen: {err}");
+                    if window.fullscreen().is_some() {
+                        window.set_fullscreen(None);
+                    } else {
+                        window.set_fullscreen(Some(Fullscreen::Borderless(
+                            event_loop.available_monitors().next(),
+                        )));
                     }
+                    self.refresh_layered_window_attributes();
                 }
                 KeyCode::Space => {
-                    self.paused = !self.paused;
                     if let Some(command_tx) = &self.command_tx {
                         let _ = command_tx.send(PlaybackCommand::TogglePause);
                     }
@@ -327,12 +360,6 @@ impl App {
                 }
                 _ => {}
             }
-            if matches!(
-                key,
-                KeyCode::KeyW | KeyCode::KeyS | KeyCode::KeyA | KeyCode::KeyD
-            ) {
-                window.set_outer_position(self.position);
-            }
         }
     }
 }
@@ -343,12 +370,12 @@ impl ApplicationHandler for App {
             warn!("Window already created, ignoring resumed event");
             return;
         }
-
+        let title = format!("AmazingWidget - {}", self.file_name);
         let window = event_loop.create_window(
             WindowAttributes::default()
-                .with_title(&self.title)
-                .with_inner_size(self.size)
-                .with_position(self.position)
+                .with_title(title)
+                .with_inner_size(PhysicalSize::new(800, 450))
+                .with_position(PhysicalPosition::new(900, 100))
                 .with_decorations(false)
                 .with_transparent(true)
                 .with_window_level(WindowLevel::AlwaysOnTop)
@@ -364,20 +391,9 @@ impl ApplicationHandler for App {
         };
 
         self.window = Some(window);
+        self.refresh_layered_window_attributes();
+
         let hwnd = self.hwnd();
-
-        // A layered window must opt into both the color-key transparency and the
-        // transparent hit-test behavior. Otherwise the OS still treats the top-level
-        // overlay as receiving mouse input even when the underlying pixels are black.
-        // WS_EX::LAYERED makes the black pixels transparent to clicks
-        // WS_EX::LAYERED | WS_EX::TRANSPARENT makes the entire window transparent to clicks
-        hwnd.set_style_ex(hwnd.style_ex() | co::WS_EX::LAYERED);
-        if let Err(err) =
-            hwnd.SetLayeredWindowAttributes(BLACK, self.transparency, co::LWA::COLORKEY)
-        {
-            error!("SetLayeredWindowAttributes failed: {err}");
-        }
-
         // Store the original window procedure
         let old_proc = hwnd.GetWindowLongPtr(co::GWLP::WNDPROC);
         // Safety: This is known to be a valid WNDPROC pointer,
@@ -390,7 +406,7 @@ impl ApplicationHandler for App {
         unsafe { hwnd.SetWindowLongPtr(co::GWLP::WNDPROC, custom_wndproc as *const () as isize) };
         // Send the initial window size to the FFmpeg thread if the channel is available
         if let Some(size_tx) = &self.size_sync {
-            let _ = size_tx.send(self.size);
+            let _ = size_tx.send(self.size());
         }
         debug!("Window created");
     }
@@ -453,11 +469,7 @@ impl ApplicationHandler for App {
                     self.handle_key_press(event_loop, key);
                 }
             }
-            WindowEvent::Moved(position) => {
-                self.position = position;
-            }
             WindowEvent::Resized(size) => {
-                self.size = size;
                 if let Some(size_tx) = &self.size_sync {
                     let _ = size_tx.send(size);
                 }
